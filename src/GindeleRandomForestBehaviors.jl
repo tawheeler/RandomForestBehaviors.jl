@@ -39,39 +39,11 @@ type GindeleRandomForestBehavior <: AbstractVehicleBehavior
 end
 
 function _calc_mvnormal(
-    basics::FeatureExtractBasics,
-    behavior::GindeleRandomForestBehavior,
-    carind::Int,
-    frameind::Int
-    )
-
-    logindexbase = calc_logindexbase(carind)
-
-    indicators = behavior.indicators
-    observations = observe(basics, carind, frameind, indicators)
-
-    X = Array(Float64, length(indicators))
-    for (i,feature) in enumerate(indicators)
-        X[i] = clamp(observations[symbol(feature)], -FEATURE_EXTREMUM, FEATURE_EXTREMUM)
-    end
-
-    μ = vec(apply_forest(behavior.model_μ, X)) #vec(behavior.model_μ[:predict](X))
-    Σ = apply_forest(behavior.model_Σ, X)
-
-    # println(μ, "  ", typeof(μ))
-    # println(Σ, "  ", typeof(Σ))
-
-    # MvNormal(μ, full(behavior.model_Σ.Σ))
-    MvNormal(μ,Σ)
-end
-function _calc_mvnormal(
     basics::FeatureExtractBasicsPdSet,
     behavior::GindeleRandomForestBehavior,
     carind::Int,
     frameind::Int
     )
-
-    logindexbase = calc_logindexbase(carind)
 
     indicators = behavior.indicators
     observations = Features.observe(basics, carind, frameind, indicators)
