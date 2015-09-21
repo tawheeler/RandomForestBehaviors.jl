@@ -151,6 +151,7 @@ function train(::Type{GindeleRandomForestBehavior}, trainingframes::DataFrame;
                      STDTURNRATE500MS,  STDTURNRATE750MS,  STDTURNRATE1S,  STDTURNRATE1500MS,  STDTURNRATE2S,  STDTURNRATE2500MS,  STDTURNRATE3S,  STDTURNRATE4S
                  ],
     ntrees::Integer = TRAIN_N_TREES,
+    max_depth::Integer = TRAIN_MAX_DEPTH,
     args::Dict=Dict{Symbol,Any}()
     )
 
@@ -159,6 +160,8 @@ function train(::Type{GindeleRandomForestBehavior}, trainingframes::DataFrame;
             indicators = v
         elseif k == :ntrees
             ntrees = v
+        elseif k == :max_depth
+            max_depth = v
         else
             warn("Train GindeleRandomForestBehavior: ignoring $k")
         end
@@ -166,7 +169,7 @@ function train(::Type{GindeleRandomForestBehavior}, trainingframes::DataFrame;
 
     build_tree_params = BuildTreeParameters(
         nsubfeatures=int(sqrt(length(indicators))),
-        max_depth=TRAIN_MAX_DEPTH,
+        max_depth=max_depth,
         min_samples_split=TRAIN_MIN_SAMPLES_SPLIT,
         min_samples_leaves=TRAIN_MIN_SAMPLES_LEAVES,
         min_split_improvement=TRAIN_MIN_SPLIT_IMPROVEMENT)
