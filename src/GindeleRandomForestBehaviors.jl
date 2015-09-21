@@ -16,7 +16,7 @@ export
 #################
 
 # function append_to_python_searth_path( str::String )
-#     unshift!(PyVector(pyimport("sys")["path"]), str) 
+#     unshift!(PyVector(pyimport("sys")["path"]), str)
 # end
 # append_to_python_searth_path("/home/tim/Documents/wheelerworkspace/Bosch/model/")
 # @pyimport random_forests as random_forests
@@ -98,6 +98,30 @@ function calc_action_loglikelihood(
     normal = _calc_mvnormal(basics, behavior, carind, validfind)
     logpdf(normal, [action_lat, action_lon])
 end
+function calc_action_loglikelihood(
+    behavior::GindeleRandomForestBehavior,
+    features::DataFrame,
+    frameind::Integer,
+    )
+
+    # TODO(tim): make this more memory efficient by preallocating
+
+    action_lat = features[frameind, symbol(FUTUREDESIREDANGLE_250MS)]::Float64
+    action_lon = features[frameind, symbol(FUTUREACCELERATION_250MS)]::Float64
+
+    indicators = behavior.indicators
+
+    X = Array(Float64, length(indicators))
+    for (i,feature) in enumerate(indicators)
+        v = features[frameind, symbol(feature)]::Float64
+        X[i] = clamp(v, -FEATURE_EXTREMUM, FEATURE_EXTREMUM)
+    end
+
+    μ = vec(apply_forest(behavior.model_μ, X))
+    Σ = apply_forest(behavior.model_Σ, X)
+
+    logpdf(MvNormal(μ,Σ), [action_lat, action_lon])
+end
 
 function train(::Type{GindeleRandomForestBehavior}, trainingframes::DataFrame;
     indicators::Vector{AbstractFeature} = [
@@ -126,17 +150,20 @@ function train(::Type{GindeleRandomForestBehavior}, trainingframes::DataFrame;
                         STDACCFY500MS,     STDACCFY750MS,     STDACCFY1S,     STDACCFY1500MS,     STDACCFY2S,     STDACCFY2500MS,     STDACCFY3S,     STDACCFY4S,
                      STDTURNRATE500MS,  STDTURNRATE750MS,  STDTURNRATE1S,  STDTURNRATE1500MS,  STDTURNRATE2S,  STDTURNRATE2500MS,  STDTURNRATE3S,  STDTURNRATE4S
                  ],
+    ntrees::Integer = TRAIN_N_TREES,
     args::Dict=Dict{Symbol,Any}()
     )
 
     for (k,v) in args
         if k == :indicators
             indicators = v
+        elseif k == :ntrees
+            ntrees = v
         else
             warn("Train GindeleRandomForestBehavior: ignoring $k")
         end
     end
-    
+
     build_tree_params = BuildTreeParameters(
         nsubfeatures=int(sqrt(length(indicators))),
         max_depth=TRAIN_MAX_DEPTH,
@@ -176,13 +203,13 @@ function train(::Type{GindeleRandomForestBehavior}, trainingframes::DataFrame;
     X = X[1:total, :]::Matrix{Float64}
 
     build_tree_params.loss_function = :mse
-    μ = build_forest(y, X, TRAIN_N_TREES, build_tree_params, TRAIN_PARTIAL_SAMPLING)
+    μ = build_forest(y, X, ntrees, build_tree_params, TRAIN_PARTIAL_SAMPLING)
     Δ = deepcopy(y)
     for i = 1 : size(y, 1)
         Δ[:,i] -= apply_forest(μ, vec(X[i,:]))
     end
     build_tree_params.loss_function = :logl
-    Σ = build_forest_covariance(Δ, X, TRAIN_N_TREES, build_tree_params, TRAIN_PARTIAL_SAMPLING)
+    Σ = build_forest_covariance(Δ, X, ntrees, build_tree_params, TRAIN_PARTIAL_SAMPLING)
 
     GindeleRandomForestBehavior(μ, Σ, indicators)
 end
