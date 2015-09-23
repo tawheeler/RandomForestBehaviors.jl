@@ -11,7 +11,7 @@ export
     CovLeaf,
     MvNormLeaf,
 
-    Node,
+    InternalNode,
     Ensemble,
     BuildTreeParameters,
 
@@ -25,7 +25,7 @@ export
     build_forest,
     build_tree_parameters
 
-using Distributions: MvNormal
+import Distributions: MvNormal
 
 if VERSION.minor >= 4
     typealias Range1{Int} Range{Int}
@@ -50,15 +50,15 @@ immutable MvNormLeaf <: Leaf
     m::MvNormal
 end
 
-immutable Node{T<:Any, LeafType<:Leaf}
+immutable InternalNode{T<:Any, LeafType<:Leaf}
     featid::Int # id of the feature we use to split
     featval::T # value over which we split
-    left::Union(LeafType, Node)
-    right::Union(LeafType, Node)
+    left::Union(LeafType, InternalNode)
+    right::Union(LeafType, InternalNode)
 end
 
-immutable Ensemble{T<:Any, LeafType<:Leaf}
-    trees::Vector{Node{T, LeafType}}
+immutable Ensemble{LeafType<:Leaf}
+    trees::Vector{Union(InternalNode, LeafType)}
 end
 
 type BuildTreeParameters{F<:LossFunction, LeafType<:Any}
@@ -108,11 +108,11 @@ function Base.print(io::IO, params::BuildTreeParameters)
 end
 
 Base.length(::Leaf) = 1
-Base.length(tree::Node) = length(tree.left) + length(tree.right)
+Base.length(tree::InternalNode) = length(tree.left) + length(tree.right)
 Base.length(ensemble::Ensemble) = length(ensemble.trees)
 
 depth(::Leaf) = 0
-depth(tree::Node) = 1 + max(depth(tree.left), depth(tree.right))
+depth(tree::InternalNode) = 1 + max(depth(tree.left), depth(tree.right))
 
 _nsamples_labels(labels::Matrix{Float64}) = size(labels,2)
 _nobservations(labels::Matrix{Float64}) = size(labels,1)
@@ -122,7 +122,7 @@ function print_tree(leaf::Leaf, depth::Integer=-1, indent::Integer=0)
     print("    " ^ indent * "R-> ")
     println(leaf)
 end
-function print_tree(tree::Node, depth::Integer=-1, indent::Integer=0)
+function print_tree(tree::InternalNode, depth::Integer=-1, indent::Integer=0)
     if depth == indent
         println()
         return
@@ -135,7 +135,7 @@ function print_tree(tree::Node, depth::Integer=-1, indent::Integer=0)
 end
 
 apply_tree(leaf::Leaf, feature::Array) = leaf
-function apply_tree(tree::Node, features::Vector)
+function apply_tree(tree::InternalNode, features::Vector)
     if features[tree.featid] < tree.featval
         apply_tree(tree.left, features)
     else
@@ -143,7 +143,7 @@ function apply_tree(tree::Node, features::Vector)
     end
 end
 
-function apply_forest!{T<:Any, LeafType<:MeanVecLeaf}(μ::Vector{T}, forest::Ensemble{T,LeafType}, features::Vector)
+function apply_forest!{T<:Any}(μ::Vector{T}, forest::Ensemble{MeanVecLeaf}, features::Vector)
 
     # return the mean among tree's observations
 
@@ -156,7 +156,7 @@ function apply_forest!{T<:Any, LeafType<:MeanVecLeaf}(μ::Vector{T}, forest::Ens
     for i in 1 : ntrees
         leaf = apply_tree(forest.trees[i], features)::MeanVecLeaf
         for j in 1 : o
-            μ[i] +=leaf.μ[i]
+            μ[j] += leaf.μ[j]
         end
     end
     for i in 1 : o
@@ -164,7 +164,7 @@ function apply_forest!{T<:Any, LeafType<:MeanVecLeaf}(μ::Vector{T}, forest::Ens
     end
     μ
 end
-function apply_forest!{T<:Any, LeafType<:CovLeaf}(Σ::Matrix{T}, forest::Ensemble{T,LeafType}, features::Vector)
+function apply_forest!{T<:Any}(Σ::Matrix{T}, forest::Ensemble{CovLeaf}, features::Vector)
 
     # return the mean covariance matrix among the tree's covariances
 
@@ -264,14 +264,14 @@ end
 function _fast_det{T<:FloatingPoint}(M::AbstractMatrix{T})
     n = size(M,1)
     if n == 1
-        Σ[1]
+        M[1]
     elseif n == 2
-        Σ[1]*Σ[4] - Σ[2]*Σ[3]
+        M[1]*M[4] - M[2]*M[3]
     elseif n == 3
-        Σ[1]*Σ[5]*Σ[9] + Σ[4]*Σ[8]*Σ[3] + Σ[7]*Σ[2]*Σ[6] -
-            Σ[7]*Σ[5]*Σ[3] - Σ[4]*Σ[2]*Σ[9] - Σ[1]*Σ[8]*Σ[6]
+        M[1]*M[5]*M[9] + M[4]*M[8]*M[3] + M[7]*M[2]*M[6] -
+            M[7]*M[5]*M[3] - M[4]*M[2]*M[9] - M[1]*M[8]*M[6]
     else
-        det(Σ)
+        det(M)
     end
 end
 
@@ -489,7 +489,7 @@ function loss{T<:FloatingPoint}(
         if assignment[i] == assignment_id
             m_assigned += 1
             for a = 1 : n
-                μ[i] += labels[a,i]
+                μ[a] += labels[a,i]
             end
         end
     end
@@ -806,7 +806,7 @@ function build_leaf{T<:FloatingPoint}(
     #=
     Construct a leaf whose payload is the covariance matrix for all samples within it
     =#
-
+    o = _nobservations(labels)
     CovLeaf(_calc_covariance_mean_subtracted!(zeros(T, o, o), labels, assignment, assignment_id))
 end
 function build_leaf{T<:FloatingPoint}(
@@ -838,6 +838,8 @@ function build_leaf{T<:FloatingPoint}(
 
     # calc covariance
 
+    Σ = zeros(T, o, o)
+
     for i = 1 : n
         if assignment[i] == assignment_id
             for a = 1 : o
@@ -850,7 +852,7 @@ function build_leaf{T<:FloatingPoint}(
     end
 
     if n_for_id < 2
-        warn("Not enough samples to build a covariance matrix")
+        warn("MvDecisionTrees.build_leaf{MvNormLeaf}: Not enough samples ($n_for_id) to build a covariance matrix")
         for i = 1 : o
             Σ[i,i] = 1.0
         end
@@ -884,8 +886,15 @@ function _build_tree{T<:FloatingPoint, U<:Real}(
     n = _nsamples_labels(labels)
     n_for_id = 0
     for i = 1 : n
-        n_for_id += assignment[i] == assignment_id
+        n_for_id += int(assignment[i] == assignment_id)
     end
+
+    # println("size(assignment): ", size(assignment))
+    # println(assignment[1:20])
+    # println("assignment_id:    ", assignment_id)
+    # println("n_for_id: ", n_for_id)
+    # println("_depth ≥ params.max_depth   ", _depth ≥ params.max_depth)
+    # println("n_for_id < params.min_samples_split:   ", n_for_id < params.min_samples_split)
 
     if _depth ≥ params.max_depth || n_for_id < params.min_samples_split
         return build_leaf(params.leaf_type, labels, assignment, assignment_id)
@@ -897,6 +906,9 @@ function _build_tree{T<:FloatingPoint, U<:Real}(
                         params.loss_function,
                         mem
                         )
+
+    # println("split id:      ", id)
+    # println("split thresh:  ", thresh)
 
     if id == 0
         return build_leaf(params.leaf_type, labels, assignment, assignment_id)
@@ -912,13 +924,13 @@ function _build_tree{T<:FloatingPoint, U<:Real}(
         end
     end
 
-    return Node(id, thresh,
+    return InternalNode{T, params.leaf_type}(id, thresh,
                 _build_tree(labels, features, assignment, next_id,       params, mem, _depth+1),
                 _build_tree(labels, features, assignment, assignment_id, params, mem, _depth+1))
 end
 function build_tree{T<:FloatingPoint, U<:Real}(labels::Matrix{T}, features::Matrix{U}, params::BuildTreeParameters)
 
-    o = size(labels,1)
+    o, n = size(labels)
     μ_l = Array(T, o)
     μ_r = Array(T, o)
     Σ_l = Array(T, o,o)
@@ -936,13 +948,13 @@ end
 
 function _build_forest_parallel{T<:FloatingPoint, U<:Real}(labels::Matrix{T}, features::Matrix{U}, ntrees::Integer, params::BuildTreeParameters, partialsampling::Float64)
     nlabels = _nsamples_labels(labels)
-    nsamples = _int(partialsampling * Nlabels)
+    nsamples = _int(partialsampling * nlabels)
 
     forest = @parallel (vcat) for i in 1:ntrees
         inds = rand(1:nlabels, nsamples)
         build_tree(labels[:,inds], features[inds,:], params)
     end
-    Ensemble([forest;])
+    Ensemble{params.leaf_type}(convert(Vector{Union(InternalNode, params.leaf_type)}, forest))
 end
 function _build_forest_serial{T<:FloatingPoint, U<:Real}(labels::Matrix{T}, features::Matrix{U}, ntrees::Integer, params::BuildTreeParameters, partialsampling::Float64)
 
@@ -955,25 +967,32 @@ function _build_forest_serial{T<:FloatingPoint, U<:Real}(labels::Matrix{T}, feat
     nfeatures = size(features,2)
     nsubfeatures = params.nsubfeatures > 0 ? min(params.nsubfeatures, nfeatures) : nfeatures
     subfeature_indeces = Array(Int, nsubfeatures)
-    assignment = ones(Int, n+1)
+    assignment = ones(Int, nlabels+1)
     nsamples = _int(partialsampling * nlabels)
+
+    chosen_samples = Array(Int, nsamples)
 
     mem = PreallocatedLearningMemory{T}(μ_l, μ_r, Σ_l, Σ_r, subfeature_indeces)
 
-    forest = Array(params.leaf_type, ntrees)
+    forest = Array(Union(InternalNode, params.leaf_type), ntrees)
     for i = 1 : ntrees
 
         # select nsamples
-        _reservoir_sample!(assignment, nlabels, nsamples)
-        for j = nsamples+1:nlabels
+        _reservoir_sample!(chosen_samples, nlabels)
+        for j = 1:nlabels
             assignment[j] = 0 # remove labels that we are not considering
         end
+        for j in chosen_samples
+            assignment[j] = 1
+        end
+        assignment[end] = 1
+
 
         # build the tree
         forest[i] = _build_tree(labels, features, assignment, 1, params, mem)
     end
 
-    Ensemble([forest;])
+    Ensemble{params.leaf_type}(forest)
 end
 function build_forest{T<:FloatingPoint, U<:Real}(labels::Matrix{T}, features::Matrix{U}, ntrees::Integer, params::BuildTreeParameters, partialsampling::Float64=0.7)
 

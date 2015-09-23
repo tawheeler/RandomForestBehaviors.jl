@@ -43,12 +43,12 @@ function select_action(
     )
 
     # pick a tree at random
-    tree_index = rand(1:length(behavior.forest))
+    tree_index = rand(1:length(behavior.forest.trees))
 
     # sample from the MvNorm for said tree
     frameind = validfind2frameind(basics.pdset, validfind)
-    Features.observe!(behavior.X, basics, carind, frameind, indicators)
-    leaf = apply_tree(behavior.forest[tree_index], behavior.X)::MvNormLeaf
+    Features.observe!(behavior.X, basics, carind, frameind, behavior.indicators)
+    leaf = apply_tree(behavior.forest.trees[tree_index], behavior.X)::MvNormLeaf
     normal  = leaf.m
 
     _rand!(normal, behavior.A)
@@ -75,15 +75,15 @@ function calc_action_loglikelihood(
     =#
 
     frameind = validfind2frameind(basics.pdset, validfind)
-    Features.observe!(behavior.X, basics, carind, frameind, indicators)
+    Features.observe!(behavior.X, basics, carind, frameind, behavior.indicators)
 
     behavior.A[1] = action_lat
     behavior.A[2] = action_lon
 
-    ntrees = length(behavior.forest)
+    ntrees = length(behavior.forest.trees)
     logl = -ntrees*log(ntrees) # term for the probability of selecting a given mixture component (uniform)
     for tree_index in 1 : ntrees
-        leaf = apply_tree(behavior.forest[tree_index], behavior.X)::MvNormLeaf
+        leaf = apply_tree(behavior.forest.trees[tree_index], behavior.X)::MvNormLeaf
         normal  = leaf.m
         logl += logpdf(normal, behavior.A)
     end
@@ -105,13 +105,10 @@ function calc_action_loglikelihood(
         behavior.X[i] = clamp(v, -FEATURE_EXTREMUM, FEATURE_EXTREMUM)
     end
 
-    behavior.A[1] = action_lat
-    behavior.A[2] = action_lon
-
-    ntrees = length(behavior.forest)
+    ntrees = length(behavior.forest.trees)
     logl = -ntrees*log(ntrees) # term for the probability of selecting a given mixture component (uniform)
     for tree_index in 1 : ntrees
-        leaf = apply_tree(behavior.forest[tree_index], behavior.X)::MvNormLeaf
+        leaf = apply_tree(behavior.forest.trees[tree_index], behavior.X)::MvNormLeaf
         normal  = leaf.m
         logl += logpdf(normal, behavior.A)
     end
@@ -134,7 +131,6 @@ function train(::Type{DynamicForestBehavior}, trainingframes::DataFrame;
     min_samples_leaves::Integer=20,
     min_split_improvement::Float64=0.0,
     partial_sampling::Float64=0.7,
-    feautre_extremem::Float64=1000.0,
 
     args::Dict=Dict{Symbol,Any}()
     )
@@ -154,21 +150,19 @@ function train(::Type{DynamicForestBehavior}, trainingframes::DataFrame;
             min_split_improvement = v
         elseif k == :partial_sampling
             partial_sampling = v
-        elseif k == :feautre_extremem
-            feautre_extremem = v
         else
             warn("Train DynamicForestBehavior: ignoring $k")
         end
     end
 
     build_tree_params = BuildTreeParameters(
-        nsubfeatures=int(sqrt(length(indicators))),
-        max_depth=max_depth,
-        min_samples_split=min_samples_split,
-        min_samples_leaves=min_samples_leaves,
-        min_split_improvement=min_split_improvement,
-        loss_function=LossFunction_LOGL,
-        leaf_type=MvNormLeaf
+        int(sqrt(length(indicators))),
+        max_depth,
+        min_samples_split,
+        min_samples_leaves,
+        min_split_improvement,
+        LossFunction_LOGL,
+        MvNormLeaf
         )
 
     nframes = size(trainingframes, 1)
