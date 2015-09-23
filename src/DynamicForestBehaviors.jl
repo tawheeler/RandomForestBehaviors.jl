@@ -1,4 +1,4 @@
-module GindeleRandomForestBehaviors
+module DynamicForestBehaviors
 
 using AutomotiveDrivingModels
 
@@ -7,21 +7,12 @@ using RandomForestBehaviors.MvDecisionTrees
 import AutomotiveDrivingModels: AbstractVehicleBehavior, select_action, calc_action_loglikelihood, train, observe
 
 export
-    GindeleRandomForestBehavior,
+    DynamicForestBehavior,
 
     select_action,
     calc_action_loglikelihood,
-    train
-
-#################
-
-# function append_to_python_searth_path( str::String )
-#     unshift!(PyVector(pyimport("sys")["path"]), str)
-# end
-# append_to_python_searth_path("/home/tim/Documents/wheelerworkspace/Bosch/model/")
-# @pyimport random_forests as random_forests
-
-#################
+    train,
+    ntrees
 
 const FEATURE_EXTREMUM = 1000.0
 
@@ -32,45 +23,53 @@ const TRAIN_MIN_SPLIT_IMPROVEMENT = 0.0
 const TRAIN_N_TREES = 10
 const TRAIN_PARTIAL_SAMPLING = 0.7
 
-type GindeleRandomForestBehavior <: AbstractVehicleBehavior
-    model_μ::Ensemble
-    model_Σ::Ensemble
+type DynamicForestBehavior <: AbstractVehicleBehavior
+    forest::Ensemble
     indicators::Vector{AbstractFeature}
 end
 
-function _calc_mvnormal(
-    basics::FeatureExtractBasicsPdSet,
-    behavior::GindeleRandomForestBehavior,
-    carind::Int,
-    frameind::Int # TODO(tim): is validfind vs. frameind an issue here?
-    )
+# function _calc_mvnormal(
+#     basics::FeatureExtractBasicsPdSet,
+#     behavior::DynamicForestBehavior,
+#     carind::Int,
+#     frameind::Int
+#     )
 
-    indicators = behavior.indicators
-    observations = Features.observe(basics, carind, frameind, indicators)
+#     indicators = behavior.indicators
+#     observations = Features.observe(basics, carind, frameind, indicators)
 
-    X = Array(Float64, length(indicators))
-    for (i,feature) in enumerate(indicators)
-        X[i] = clamp(observations[symbol(feature)], -FEATURE_EXTREMUM, FEATURE_EXTREMUM)
-    end
+#     X = Array(Float64, length(indicators))
+#     for (i,feature) in enumerate(indicators)
+#         X[i] = clamp(observations[symbol(feature)], -FEATURE_EXTREMUM, FEATURE_EXTREMUM)
+#     end
 
-    μ = vec(apply_forest(behavior.model_μ, X)) #vec(behavior.model_μ[:predict](X))
-    Σ = apply_forest(behavior.model_Σ, X)
+#     μ = vec(apply_forest(behavior.model_μ, X)) #vec(behavior.model_μ[:predict](X))
+#     Σ = apply_forest(behavior.model_Σ, X)
 
-    # println(μ, "  ", typeof(μ))
-    # println(Σ, "  ", typeof(Σ))
+#     # println(μ, "  ", typeof(μ))
+#     # println(Σ, "  ", typeof(Σ))
 
-    # MvNormal(μ, full(behavior.model_Σ.Σ))
-    MvNormal(μ,Σ)
-end
+#     # MvNormal(μ, full(behavior.model_Σ.Σ))
+#     MvNormal(μ,Σ)
+# end
+
+ntrees(behavior::DynamicForestBehavior) = length(behavior.forest)
 
 function select_action(
     basics::FeatureExtractBasicsPdSet,
-    behavior::GindeleRandomForestBehavior,
+    behavior::DynamicForestBehavior,
     carind::Int,
     validfind::Int
     )
 
-    normal = _calc_mvnormal(basics, behavior, carind, validfind)
+    # pick a tree at random
+    tree_index = rand(1:length(behavior.forest))
+
+    # sample from the covariance matrix for said tree
+    frameind = validfind2frameind(basics.pdset, validfind)
+    observations = Features.observe(basics, carind, frameind, indicators)
+    leaf = apply_tree(behavior.forest[tree_index], observations)
+    normal  = leaf.majority
 
     action = rand(normal)
     logl = logpdf(normal, action)
@@ -83,7 +82,7 @@ end
 
 function calc_action_loglikelihood(
     basics::FeatureExtractBasicsPdSet,
-    behavior::GindeleRandomForestBehavior,
+    behavior::DynamicForestBehavior,
     carind::Int,
     validfind::Int,
     action_lat::Float64,
@@ -95,11 +94,19 @@ function calc_action_loglikelihood(
     given the VehicleBehaviorGaussian.
     =#
 
-    normal = _calc_mvnormal(basics, behavior, carind, validfind)
+    # pick a tree at random
+    tree_index = rand(1:length(behavior.forest))
+
+    # sample from the covariance matrix for said tree
+    frameind = validfind2frameind(basics.pdset, validfind)
+    observations = Features.observe(basics, carind, frameind, indicators)
+    leaf = apply_tree(behavior.forest[tree_index], observations)
+    normal  = leaf.majority
+
     logpdf(normal, [action_lat, action_lon])
 end
 function calc_action_loglikelihood(
-    behavior::GindeleRandomForestBehavior,
+    behavior::DynamicForestBehavior,
     features::DataFrame,
     frameind::Integer,
     )
@@ -111,24 +118,32 @@ function calc_action_loglikelihood(
 
     indicators = behavior.indicators
 
-    X = Array(Float64, length(indicators))
+    observations = Array(Float64, length(indicators))
     for (i,feature) in enumerate(indicators)
         v = features[frameind, symbol(feature)]::Float64
-        X[i] = clamp(v, -FEATURE_EXTREMUM, FEATURE_EXTREMUM)
+        observations[i] = clamp(v, -FEATURE_EXTREMUM, FEATURE_EXTREMUM)
     end
 
-    μ = vec(apply_forest(behavior.model_μ, X))
-    Σ = apply_forest(behavior.model_Σ, X)
+    # pick a tree at random
+    tree_index = rand(1:length(behavior.forest))
 
-    logpdf(MvNormal(μ,Σ), [action_lat, action_lon])
+    # sample from the covariance matrix for said tree
+    frameind = validfind2frameind(basics.pdset, validfind)
+    observations = Features.observe(basics, carind, frameind, indicators)
+    leaf = apply_tree(behavior.forest[tree_index], observations)
+    normal  = leaf.majority
+
+    logpdf(normal, [action_lat, action_lon])
 end
 
-function train(::Type{GindeleRandomForestBehavior}, trainingframes::DataFrame;
+function train(::Type{DynamicForestBehavior}, trainingframes::DataFrame;
     indicators::Vector{AbstractFeature} = [
                     POSFY, YAW, SPEED, DELTA_SPEED_LIMIT, VELFX, VELFY, SCENEVELFX, TURNRATE,
                     D_CL, D_ML, D_MR, TIMETOCROSSING_LEFT, TIMETOCROSSING_RIGHT,
                     N_LANE_L, N_LANE_R, HAS_LANE_L, HAS_LANE_R, ACC, ACCFX, ACCFY,
                     A_REQ_STAYINLANE,
+                    HAS_FRONT, D_X_FRONT, D_Y_FRONT, V_X_FRONT, V_Y_FRONT, TTC_X_FRONT,
+                    A_REQ_FRONT, TIMEGAP_X_FRONT,
                  ],
     ntrees::Integer = TRAIN_N_TREES,
     max_depth::Integer = TRAIN_MAX_DEPTH,
@@ -143,7 +158,7 @@ function train(::Type{GindeleRandomForestBehavior}, trainingframes::DataFrame;
         elseif k == :max_depth
             max_depth = v
         else
-            warn("Train GindeleRandomForestBehavior: ignoring $k")
+            warn("Train DynamicForestBehavior: ignoring $k")
         end
     end
 
@@ -154,7 +169,8 @@ function train(::Type{GindeleRandomForestBehavior}, trainingframes::DataFrame;
         min_samples_leaves=TRAIN_MIN_SAMPLES_LEAVES,
         min_split_improvement=TRAIN_MIN_SPLIT_IMPROVEMENT,
         loss_function=LossFunction_MSE,
-        leaf_type=MvNormLeaf)
+        leaf_type=MvNormLeaf
+        )
 
     nframes = size(trainingframes, 1)
 
@@ -187,25 +203,10 @@ function train(::Type{GindeleRandomForestBehavior}, trainingframes::DataFrame;
     y = y[:, 1:total]::Matrix{Float64}
     X = X[1:total, :]::Matrix{Float64}
 
+    # TODO(tim): build a forest whose nodes are MvNormals
     μ = build_forest(y, X, ntrees, build_tree_params, TRAIN_PARTIAL_SAMPLING)
 
-    # TODO(tim): do I need to deepcopy y instead?
-    for i = 1 : size(y, 1)
-        y[:,i] -= apply_forest(μ, vec(X[i,:]))
-    end
-
-    build_tree_params = BuildTreeParameters(
-        nsubfeatures=int(sqrt(length(indicators))),
-        max_depth=max_depth,
-        min_samples_split=TRAIN_MIN_SAMPLES_SPLIT,
-        min_samples_leaves=TRAIN_MIN_SAMPLES_LEAVES,
-        min_split_improvement=TRAIN_MIN_SPLIT_IMPROVEMENT,
-        loss_function=LossFunction_LOGL,
-        leaf_type=MvNormLeaf)
-
-    Σ = build_forest_covariance(y, X, ntrees, build_tree_params, TRAIN_PARTIAL_SAMPLING)
-
-    GindeleRandomForestBehavior(μ, Σ, indicators)
+    DynamicForestBehavior(μ, Σ, indicators)
 end
 
 end # end module

@@ -1,10 +1,11 @@
-module MvDecisionTrees
+# module MvDecisionTrees
 
-export Leaf, Node, Ensemble, BuildTreeParameters, print_tree, depth,
-       build_stump, build_tree, build_tree_covariance, apply_tree, nfoldCV_tree,
+export Node, Ensemble, BuildTreeParameters, print_tree, depth,
+       build_leaf, build_stump, build_tree, build_tree_covariance, apply_tree, nfoldCV_tree,
        build_forest, build_forest_covariance, apply_forest, nfoldCV_forest,
-       majority_vote,
        mean_squared_error, R2, _int
+
+using Distributions: MvNormal
 
 if VERSION.minor >= 4
     typealias Range1{Int} Range{Int}
@@ -19,36 +20,45 @@ abstract LossFunction
 type LossFunction_MSE<:LossFunction end # mean squared error loss function
 type LossFunction_LOGL<:LossFunction end # log likelihood loss function
 
-immutable Leaf
-    majority::Any
+abstract Leaf
+immutable MeanVecLeaf{T<:FloatingPoint} <: Leaf
+    μ::Vector{T}
+end
+immutable CovLeaf{T<:FloatingPoint} <: Leaf
+    Σ::Matrix{T}
+end
+immutable MvNormLeaf <: Leaf
+    m::MvNormal
 end
 
-immutable Node
+immutable Node{T<:Any, LeafType<:Leaf}
     featid::Int # id of the feature we use to split
-    featval::Any # value over which we split
-    left::Union(Leaf, Node)
-    right::Union(Leaf, Node)
+    featval::T # value over which we split
+    left::Union(LeafType, Node)
+    right::Union(LeafType, Node)
 end
 
-immutable Ensemble
-    trees::Vector{Node}
+immutable Ensemble{T<:Any, LeafType<:Leaf}
+    trees::Vector{Node{T, LeafType}}
 end
 
-type BuildTreeParameters{F<:LossFunction}
+type BuildTreeParameters{F<:LossFunction, LeafType<:Any}
     nsubfeatures::Int # number of candidate features to select for split; 0 will use all
     max_depth::Int # will only split if above this depth (depth of just a leaf is 0)
     min_samples_split::Int # minimum number of samples requried in a node to split
     min_samples_leaves::Int # minimum number of samples in newly created leaves
     min_split_improvement::Float64 # will only split if loss(split(leaf)) > loss(leaf) + min_split_improvement
     loss_function::Type{F}
+    leaf_type::Type{LeafType} # the type used for the leaf
 end
-function build_tree_parameters{F<:LossFunction}(;
+function build_tree_parameters{F<:LossFunction, LeafType<:Leaf}(;
     nsubfeatures::Int=0,
     max_depth::Int=typemax(Int),
     min_samples_split::Int=5,
     min_samples_leaves::Int=0,
     min_split_improvement::Float64=-Inf,
-    loss_function::Type{F}=LossFunction_LOGL
+    loss_function::Type{F}=LossFunction_MSE,
+    leaf_type::Type{LeafType}=MeanVecLeaf,
     )
 
     @assert(nsubfeatures ≥ 0)
@@ -56,7 +66,8 @@ function build_tree_parameters{F<:LossFunction}(;
     @assert(min_samples_split ≥ 0)
     @assert(min_samples_leaves ≤ min_samples_split/2)
 
-    BuildTreeParameters{loss_function}(nsubfeatures, max_depth, min_samples_split, min_samples_leaves, min_split_improvement, loss_function)
+    BuildTreeParameters{F, LeafType}(nsubfeatures, max_depth, min_samples_split,
+               min_samples_leaves, min_split_improvement, loss_function, leaf_type)
 end
 
 function Base.print(io::IO, params::BuildTreeParameters)
@@ -68,10 +79,6 @@ function Base.print(io::IO, params::BuildTreeParameters)
     @printf(io, "\tmin_split_improvement: %8.3f\n", params.min_split_improvement)
     @printf(io, "\tloss_function:         %8s\n", string(params.loss_function))
 end
-
-Base.convert(::Type{Node}, x::Leaf) = Node(0, nothing, x, Leaf(nothing,[nothing]'))
-Base.promote_rule(::Type{Node}, ::Type{Leaf}) = Node
-Base.promote_rule(::Type{Leaf}, ::Type{Node}) = Node
 
 Base.length(::Leaf) = 1
 Base.length(tree::Node) = length(tree.left) + length(tree.right)
@@ -85,10 +92,8 @@ _nobservations(labels::Matrix{Float64}) = size(labels,1)
 
 function print_tree(leaf::Leaf, depth::Integer=-1, indent::Integer=0)
     # NOTE(tim): I think this only works for classification
-    matches = find(leaf.values .== leaf.majority)
-    ratio = string(length(matches)) * "/" * string(length(leaf.values))
     print("    " ^ indent * "R-> ")
-    println("$(leaf.majority) : $(ratio)")
+    println(leaf)
 end
 
 function print_tree(tree::Node, depth::Integer=-1, indent::Integer=0)
@@ -103,121 +108,40 @@ function print_tree(tree::Node, depth::Integer=-1, indent::Integer=0)
     print_tree(tree.right, depth, indent + 1)
 end
 
-function _hist_add!{T}(counts::Dict{T,Int}, labels::Vector{T}, region::Range1{Int})
-    for i in region
-        lbl = labels[i]
-        counts[lbl] = get(counts, lbl, 0) + 1
-    end
-    return counts
-end
-
-function _hist_sub!{T}(counts::Dict{T,Int}, labels::Vector{T}, region::Range1{Int})
-    for i in region
-        lbl = labels[i]
-        counts[lbl] -= 1
-    end
-    return counts
-end
-
-function _hist_shift!{T}(counts_from::Dict{T,Int}, counts_to::Dict{T,Int}, labels::Vector{T}, region::Range1{Int})
-    for i in region
-        lbl = labels[i]
-        counts_from[lbl] -= 1
-        counts_to[lbl] = get(counts_to, lbl, 0) + 1
-    end
-    return nothing
-end
-
-_hist{T}(labels::Vector{T}, region::Range1{Int} = 1:endof(labels)) =
-    _hist_add!(Dict{T,Int}(), labels, region)
-
-function majority_vote(labels::Vector)
-    if length(labels) == 0
-        return nothing
-    end
-    counts = _hist(labels)
-    top_vote = labels[1]
-    top_count = -1
-    for (k,v) in counts
-        if v > top_count
-            top_vote = k
-            top_count = v
-        end
-    end
-    return top_vote
-end
-
-apply_tree(leaf::Leaf, feature::Vector) = leaf.majority
-
+apply_tree(leaf::Leaf, feature::Array) = leaf
 function apply_tree(tree::Node, features::Vector)
-    if tree.featval == nothing
-        return apply_tree(tree.left, features)
-    elseif features[tree.featid] < tree.featval
-        return apply_tree(tree.left, features)
+    if features[tree.featid] < tree.featval
+        apply_tree(tree.left, features)
     else
-        return apply_tree(tree.right, features)
+        apply_tree(tree.right, features)
     end
 end
 
-function apply_tree(tree::Union(Leaf,Node), features::Matrix)
-    N = size(features,1)
-    predictions = Array(Any,N)
-    for i in 1:N
-        predictions[i] = apply_tree(tree, squeeze(features[i,:],1))
-    end
-    if typeof(predictions[1]) <: FloatingPoint
-        return float(predictions)
-    elseif typeof(predictions[1]) <: Vector && eltype(predictions[1]) <: FloatingPoint
-        retval = Array(Vector{Float64}, length(predictions))
-        for i = 1 : N
-            retval[i] = float(predictions[i])
-        end
-        return retval
-    else
-        return predictions
-    end
-end
+function apply_forest{T<:Any, LeafType<:MeanVecLeaf}(forest::Ensemble{T,LeafType}, features::Vector)
 
-function apply_forest(forest::Ensemble, features::Vector)
     ntrees = length(forest)
-    votes = Array(Any,ntrees)
-    for i in 1:ntrees
-        votes[i] = apply_tree(forest.trees[i],features)
-    end
-    if typeof(votes[1]) <: FloatingPoint
-        return mean(votes)
-    elseif typeof(votes[1]) <: Vector && eltype(votes[1]) <: FloatingPoint
-        return mean(votes)
-    elseif typeof(votes[1]) <: Matrix && eltype(votes[1]) <: FloatingPoint
-        return mean(votes)
-    else
-        return majority_vote(votes)
-    end
-end
 
-function apply_forest(forest::Ensemble, features::Matrix)
-    N = size(features,1)
-    predictions = Array(Any,N)
-    for i in 1:N
-        predictions[i] = apply_forest(forest, squeeze(features[i,:],1))
+    mean_vec = deepcopy(apply_tree(forest.trees[1], features))
+    for i in 2 : ntrees
+        mean_vec += apply_tree(forest.trees[i], features)
     end
-    if typeof(predictions[1]) <: FloatingPoint
-        return float(predictions)
-    elseif typeof(predictions[1]) <: Vector && eltype(predictions[1]) <: FloatingPoint
-        retval = Array(Vector{Float64}, length(predictions))
-        for i = 1 : N
-            retval[i] = float(predictions[i])
-        end
-        return retval
-    elseif typeof(predictions[1]) <: Matrix && eltype(predictions[1]) <: FloatingPoint
-        retval = Array(Matrix{Float64}, length(predictions))
-        for i = 1 : N
-            retval[i] = float(predictions[i])
-        end
-        return retval
-    else
-        return predictions
+    for i in 1 : length(mean_vec)
+        mean_vec[i] /= ntrees
     end
+    mean_vec
+end
+function apply_forest{T<:Any, LeafType<:CovLeaf}(forest::Ensemble{T,LeafType}, features::Vector)
+
+    ntrees = length(forest)
+
+    mean_cov = deepcopy(apply_tree(forest.trees[1], features))
+    for i in 2 : ntrees
+        mean_cov += apply_tree(forest.trees[i], features)
+    end
+    for i in 1 : length(mean_cov)
+        mean_cov[i] /= ntrees
+    end
+    mean_cov
 end
 
 ### Regression ###
@@ -268,6 +192,14 @@ function _calc_covariance!{T<:FloatingPoint}(
             n_for_id += 1
         end
     end
+
+    if n_for_id < 2
+        for i = 1 : o
+            Σ[i,i] = 1.0
+        end
+        return Σ
+    end
+
     for i = 1 : o*o
         Σ[i] /= (n_for_id-1)
     end
@@ -611,6 +543,78 @@ function _split{F<:LossFunction, T<:FloatingPoint, U<:Real}(
     best
 end
 
+function build_leaf{T<:FloatingPoint}(
+    ::Type{MeanVecLeaf},
+    labels::Matrix{T},
+    assignment::Vector{Int},
+    assignment_id::Int,
+    )
+
+    #=
+    Construct a leaf whose payload is the mean vector of samples within it
+    =#
+
+    o, n = size(labels)
+    leaf_mean = zeros(T, o)
+
+    n_for_id = 0
+    for i = 1 : n
+        if assignment[i] == assignment_id
+            n_for_id += 1
+            for j = 1 : o
+                leaf_mean[j] += labels[j,i]
+            end
+        end
+    end
+    for j = 1 : o
+        @inbounds leaf_mean[j] /= n_for_id
+    end
+
+    MeanVecLeaf(leaf_mean)
+end
+function build_leaf{T<:FloatingPoint}(
+    ::Type{CovLeaf},
+    labels::Matrix{T},
+    assignment::Vector{Int},
+    assignment_id::Int,
+    )
+
+    #=
+    Construct a leaf whose payload is the covariance matrix for all samples within it
+    =#
+
+    CovLeaf(_calc_covariance!(zeros(T, o, o), labels, assignment, assignment_id))
+end
+function build_leaf{T<:FloatingPoint}(
+    ::Type{MvNormLeaf},
+    labels::Matrix{T},
+    assignment::Vector{Int},
+    assignment_id::Int,
+    )
+
+    #=
+    Construct a leaf whose payload is the mvnormal for all samples within it
+    =#
+
+    o, n = size(labels)
+    leaf_mean = zeros(T, o)
+
+    n_for_id = 0
+    for i = 1 : n
+        if assignment[i] == assignment_id
+            n_for_id += 1
+            for j = 1 : o
+                leaf_mean[j] += labels[j,i]
+            end
+        end
+    end
+    for j = 1 : o
+        @inbounds leaf_mean[j] /= n_for_id
+    end
+
+    MvNormLeaf(MvNormal(leaf_mean, _calc_covariance!(zeros(T, o, o), labels, assignment, assignment_id)))
+end
+
 function build_stump{T<:FloatingPoint, U<:Real}(labels::Matrix{T}, features::Matrix{U})
     S = _split_mse(labels, features, 0)
     if S == NO_BEST
@@ -641,20 +645,7 @@ function _build_tree{T<:FloatingPoint, U<:Real}(
     end
 
     if _depth ≥ params.max_depth || n_for_id < params.min_samples_split
-        o = _nobservations(labels)
-        m = zeros(T, o)
-        for i = 1 : n
-            if assignment[i] == assignment_id
-                for j = 1 : o
-                    m[j] += labels[j,i]
-                end
-            end
-        end
-        for j = 1 : o
-            @inbounds m[j] /= n_for_id
-        end
-
-        return Leaf(m)
+        return build_leaf(params.leaf_type, labels, assignment, assignment_id)
     end
 
     id, thresh = _split(labels, features, assignment, assignment_id,
@@ -665,20 +656,7 @@ function _build_tree{T<:FloatingPoint, U<:Real}(
                         )
 
     if id == 0
-        o = _nobservations(labels)
-        m = zeros(T, o)
-        for i = 1 : n
-            if assignment[i] == assignment_id
-                for j = 1 : o
-                    m[j] += labels[j,i]
-                end
-            end
-        end
-        for j = 1 : o
-            @inbounds m[j] /= n_for_id
-        end
-
-        return Leaf(m) # TODO(tim): fix this
+        return build_leaf(params.leaf_type, labels, assignment, assignment_id)
     end
 
 
@@ -707,78 +685,6 @@ function build_tree{T<:FloatingPoint, U<:Real}(labels::Matrix{T}, features::Matr
     assignment = ones(Int, n+1)
 
     _build_tree(
-        labels, features, assignment, 1,
-        params, Σ_l, Σ_r, subfeature_indeces
-        )
-end
-function _build_tree_covariance{T<:FloatingPoint, U<:Real}(
-    labels::Matrix{T},
-    features::Matrix{U},
-    assignment::Vector{Int}, # [n_rows+1], last element contains the max id
-    assignment_id::Int,
-    params::BuildTreeParameters,
-    Σ_l::Matrix{T}, # n×n
-    Σ_r::Matrix{T}, # n×n
-    subfeature_indeces::Vector{Int},
-    _depth::Int=0,
-    )
-
-    n = _nsamples_labels(labels)
-    o = _nobservations(labels)
-    n_for_id = 0
-    for i = 1 : n
-        n_for_id += assignment[i] == assignment_id
-    end
-
-    if n_for_id ≤ 2
-        return Leaf(eye(o))
-    elseif _depth ≥ params.max_depth || n_for_id < params.min_samples_split
-        Σ = _calc_covariance!(zeros(T, o, o), labels, assignment, assignment_id)
-        return Leaf(Σ)
-    end
-
-    id, thresh = _split(labels, features, assignment, assignment_id,
-                        params.min_samples_leaves,
-                        params.min_split_improvement,
-                        params.loss_function,
-                        Σ_l, Σ_r, subfeature_indeces
-                        )
-
-    if id == 0
-        Σ = _calc_covariance!(zeros(T, o, o), labels, assignment, assignment_id)
-        return Leaf(Σ)
-    end
-
-
-    next_id = assignment[end]+1
-    assignment[end] = next_id
-
-    for i in 1 : n
-        if assignment[i] == assignment_id && features[i,id] < thresh
-            assignment[i] = next_id
-        end
-    end
-
-    return Node(id, thresh,
-                _build_tree_covariance(labels, features, assignment, next_id,       params, Σ_l, Σ_r, subfeature_indeces, _depth+1),
-                _build_tree_covariance(labels, features, assignment, assignment_id, params, Σ_l, Σ_r, subfeature_indeces, _depth+1))
-end
-function build_tree_covariance{T<:FloatingPoint, U<:Real}(
-    labels::Matrix{T},
-    features::Matrix{U},
-    params::BuildTreeParameters,
-    )
-
-    o = size(labels,1)
-    Σ_l = zeros(o,o)
-    Σ_r = zeros(o,o)
-
-    nfeatures = size(features,2)
-    nsubfeatures = params.nsubfeatures > 0 ? min(params.nsubfeatures, nfeatures) : nfeatures
-    subfeature_indeces = Array(Int, nsubfeatures)
-    assignment = ones(Int, n+1)
-
-    _build_tree_covariance(
         labels, features, assignment, 1,
         params, Σ_l, Σ_r, subfeature_indeces
         )
@@ -920,4 +826,4 @@ function nfoldCV_forest{T<:FloatingPoint, U<:Real}(
     _nfoldCV(:forest, labels, features, nsubfeatures, ntrees, maxlabels, partialsampling, nfolds)
 end
 
-end # end module
+# end # end module

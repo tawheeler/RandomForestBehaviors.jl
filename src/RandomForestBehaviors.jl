@@ -8,4 +8,7 @@ using .MvDecisionTrees
 include("GindeleRandomForestBehaviors.jl")
 @reexport using .GindeleRandomForestBehaviors
 
+include("DynamicForestBehaviors.jl")
+@reexport using .DynamicForestBehaviors
+
 end # module
