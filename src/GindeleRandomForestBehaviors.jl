@@ -191,7 +191,7 @@ function train(::Type{GindeleRandomForestBehavior}, trainingframes::DataFrame;
 
     # TODO(tim): do I need to deepcopy y instead?
     for i = 1 : size(y, 1)
-        y[:,i] -= apply_forest(μ, vec(X[i,:]))
+        y[:,i] -= apply_forest(μ, vec(X[i,:])) # subtract the predicted mean
     end
 
     build_tree_params = BuildTreeParameters(

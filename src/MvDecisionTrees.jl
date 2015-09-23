@@ -1,9 +1,28 @@
-# module MvDecisionTrees
+module MvDecisionTrees
 
-export Node, Ensemble, BuildTreeParameters, print_tree, depth,
-       build_leaf, build_stump, build_tree, build_tree_covariance, apply_tree, nfoldCV_tree,
-       build_forest, build_forest_covariance, apply_forest, nfoldCV_forest,
-       mean_squared_error, R2, _int
+export
+    LossFunction,
+    LossFunction_MSE,
+    LossFunction_LOGL,
+
+    Leaf,
+    MeanVecLeaf,
+    CovLeaf,
+    MvNormLeaf,
+
+    Node,
+    Ensemble,
+    BuildTreeParameters,
+
+    depth,
+    print_tree,
+    apply_tree,
+    apply_forest,
+
+    build_leaf,
+    build_tree,
+    build_forest,
+    build_tree_parameters
 
 using Distributions: MvNormal
 
@@ -14,11 +33,10 @@ else
     _int(x) = int(x)
 end
 
-const NO_BEST=(0,0)
-
 abstract LossFunction
 type LossFunction_MSE<:LossFunction end # mean squared error loss function
 type LossFunction_LOGL<:LossFunction end # log likelihood loss function
+     # NOTE(tim): to use this you must subtract the predicted mean from your labels
 
 abstract Leaf
 immutable MeanVecLeaf{T<:FloatingPoint} <: Leaf
@@ -95,7 +113,6 @@ function print_tree(leaf::Leaf, depth::Integer=-1, indent::Integer=0)
     print("    " ^ indent * "R-> ")
     println(leaf)
 end
-
 function print_tree(tree::Node, depth::Integer=-1, indent::Integer=0)
     if depth == indent
         println()
@@ -145,23 +162,24 @@ function apply_forest{T<:Any, LeafType<:CovLeaf}(forest::Ensemble{T,LeafType}, f
 end
 
 ### Regression ###
-function _select_random_subfeature_indeces!(indeces::Vector{Int}, nfeatures::Int)
+function _reservoir_sample!(indeces::Vector{Int}, n::Int, k::Int=length(indeces))
 
-    # performs Reservoir Sampling to obtain k elements from features
-    # runtime: O(nfeatures)
+    # performs Reservoir Sampling to obtain k elements from [1:n]
+    #  indeces = input array
+    #  n       = length of set of indeces to choose from (ie, we select from [1:n])
+    #  k       = number of samples to choose and place in first k elements of indeces
+    # runtime: O(n)
     # https://en.wikipedia.org/wiki/Reservoir_sampling
 
-    k = length(indeces)
-
-    if nfeatures == 0
-        nfeatures = k
+    if n == 0
+        n = k
     end
 
     for i = 1 : k
         indeces[i] = i
     end
 
-    for i = k+1 : nfeatures
+    for i = k+1 : n
         j = rand(1:i)
         if j ≤ k
             indeces[j] = i
@@ -177,6 +195,8 @@ function _calc_covariance!{T<:FloatingPoint}(
     assignment::Vector{Int},
     assignment_id::Int,
     )
+
+    # NOTE(tim): this assumes that the mean has already been subtracted from the data
 
     o, n = size(labels)
 
@@ -309,13 +329,14 @@ function loss{T<:FloatingPoint, U<:Real}(
 
     # solve for upper triangle of symmetric matrix
     for i = 1 : n*n
-        Σ_l[i] = 0
-        Σ_r[i] = 0
+        Σ_l[i] = 0.0
+        Σ_r[i] = 0.0
     end
 
     for i = 1 : m
         if assignment[i] == assignment_id
             if features[i,feature_index] < thresh
+                println("adding ", labels[:,i], " to left")
                 for a = 1 : n
                     l = labels[a,i]
                     for b = a : n
@@ -324,6 +345,7 @@ function loss{T<:FloatingPoint, U<:Real}(
                 end
                 nl += 1
             else
+                println("adding ", labels[:,i], " to right")
                 for a = 1 : n
                     l = labels[a,i]
                     for b = a : n
@@ -351,6 +373,9 @@ function loss{T<:FloatingPoint, U<:Real}(
             Σ_r[a,b] = Σ_r[b,a]
         end
     end
+
+    println(Σ_l)
+    println(Σ_r)
 
     detΣ_l = let
         if n == 1
@@ -506,11 +531,11 @@ function _split{F<:LossFunction, T<:FloatingPoint, U<:Real}(
     # returns a tuple: (index_of_feature_we_split_over, threshold)
 
     nrow, nfeatures = size(features)
-    best = NO_BEST
+    best = (0,0)
     best_loss = loss(loss_function, labels, assignment, assignment_id, Σ_l) + min_split_improvement
     n_thresholds = min(nrow-1, 10)
 
-    _select_random_subfeature_indeces!(subfeature_indeces, nfeatures)
+    _reservoir_sample!(subfeature_indeces, nfeatures)
 
     for i in subfeature_indeces
 
@@ -612,20 +637,41 @@ function build_leaf{T<:FloatingPoint}(
         @inbounds leaf_mean[j] /= n_for_id
     end
 
-    MvNormLeaf(MvNormal(leaf_mean, _calc_covariance!(zeros(T, o, o), labels, assignment, assignment_id)))
+    # calc covariance
+
+    for i = 1 : n
+        if assignment[i] == assignment_id
+            for a = 1 : o
+                l = labels[a,i] - leaf_mean[a]
+                for b = a : o
+                    Σ[a,b] += l*(labels[b,i]-leaf_mean[b])
+                end
+            end
+        end
+    end
+
+    if n_for_id < 2
+        warn("Not enough samples to build a covariance matrix")
+        for i = 1 : o
+            Σ[i,i] = 1.0
+        end
+    else
+        for i = 1 : o*o
+            Σ[i] /= (n_for_id-1)
+        end
+        for i = 1 : o
+            Σ[i,i] += 1e-20
+        end
+        for a = 2:o
+            for b = 1:a-1
+                Σ[a,b] = Σ[b,a]
+            end
+        end
+    end
+
+    MvNormLeaf(MvNormal(leaf_mean, Σ))
 end
 
-function build_stump{T<:FloatingPoint, U<:Real}(labels::Matrix{T}, features::Matrix{U})
-    S = _split_mse(labels, features, 0)
-    if S == NO_BEST
-        return Leaf(mean(labels, 1), labels)
-    end
-    id, thresh = S
-    thesplit = features[:,id] .< thresh
-    return Node(id, thresh,
-                Leaf(mean(labels[thesplit,:], 1), labels[thesplit,:]),
-                Leaf(mean(labels[!thesplit,:], 1), labels[!thesplit,:]))
-end
 function _build_tree{T<:FloatingPoint, U<:Real}(
     labels::Matrix{T},
     features::Matrix{U},
@@ -690,140 +736,54 @@ function build_tree{T<:FloatingPoint, U<:Real}(labels::Matrix{T}, features::Matr
         )
 end
 
-function build_forest{T<:FloatingPoint, U<:Real}(labels::Matrix{T}, features::Matrix{U}, ntrees::Integer, params::BuildTreeParameters, partialsampling::Float64=0.7)
-    partialsampling = partialsampling > 1.0 ? 1.0 : partialsampling
-    Nlabels = _nsamples_labels(labels)
-    Nsamples = _int(partialsampling * Nlabels)
+function _build_forest_parallel{T<:FloatingPoint, U<:Real}(labels::Matrix{T}, features::Matrix{U}, ntrees::Integer, params::BuildTreeParameters, partialsampling::Float64)
+    nlabels = _nsamples_labels(labels)
+    nsamples = _int(partialsampling * Nlabels)
+
     forest = @parallel (vcat) for i in 1:ntrees
-        inds = rand(1:Nlabels, Nsamples)
+        inds = rand(1:nlabels, nsamples)
         build_tree(labels[:,inds], features[inds,:], params)
     end
-    return Ensemble([forest;])
+    Ensemble([forest;])
 end
-function build_forest_covariance{T<:FloatingPoint, U<:Real}(
-    labels::Matrix{T},
-    features::Matrix{U},
-    ntrees::Integer,
-    params::BuildTreeParameters,
-    partialsampling::Float64=0.7
-    )
+function _build_forest_serial{T<:FloatingPoint, U<:Real}(labels::Matrix{T}, features::Matrix{U}, ntrees::Integer, params::BuildTreeParameters, partialsampling::Float64)
 
-    partialsampling = partialsampling > 1.0 ? 1.0 : partialsampling
-    Nlabels = size(labels,2)
-    Nsamples = _int(partialsampling * Nlabels)
-    forest = @parallel (vcat) for i in 1:ntrees
-        inds = rand(1:Nlabels, Nsamples)
-        build_tree_covariance(labels[:,inds], features[inds,:], params)
-    end
-    return Ensemble([forest;])
-end
+    o, nlabels = size(labels)
+    Σ_l = zeros(o,o)
+    Σ_r = zeros(o,o)
 
-function mean_squared_error(actual, predicted)
-    @assert length(actual) == length(predicted)
-    return mean((actual - predicted).^2)
-end
-function mean_squared_error(actual::Matrix, predicted::Vector)
-    @assert size(actual,1) == length(predicted)
-    tot = 0.0
-    m,n = size(actual)
-    for i = 1 : n
-        for j = 1 : m
-            Δ = actual[j,i] - predicted[j][i]
-            tot += Δ*Δ
+    nfeatures = size(features,2)
+    nsubfeatures = params.nsubfeatures > 0 ? min(params.nsubfeatures, nfeatures) : nfeatures
+    subfeature_indeces = Array(Int, nsubfeatures)
+    assignment = ones(Int, n+1)
+    nsamples = _int(partialsampling * nlabels)
+
+    forest = Array(params.leaf_type, ntrees)
+    for i = 1 : ntrees
+
+        # select nsamples
+        _reservoir_sample!(assignment, nlabels, nsamples)
+        for j = nsamples+1:nlabels
+            assignment[j] = 0 # remove labels that we are not considering
         end
+
+        # build the tree
+        forest[i] = _build_tree(
+                        labels, features, assignment, 1,
+                        params, Σ_l, Σ_r, subfeature_indeces
+                        )
     end
-    return tot / m
+
+    Ensemble([forest;])
 end
-function mean_squared_error(actual::Matrix, predicted::Matrix)
-    @assert size(actual) == size(predicted)
-    tot = 0.0
-    m,n = size(actual)
-    for i = 1 : n
-        for j = 1 : m
-            Δ = actual[j,i] - predicted[j,i]
-            tot += Δ*Δ
-        end
+function build_forest{T<:FloatingPoint, U<:Real}(labels::Matrix{T}, features::Matrix{U}, ntrees::Integer, params::BuildTreeParameters, partialsampling::Float64=0.7)
+
+    @assert(0.0 < partialsampling ≤ 1.0)
+    if nprocs() == 1
+        _build_forest_serial(labels, features, ntrees, params, partialsampling)
+    else
+        _build_forest_parallel(labels, features, ntrees, params, partialsampling)
     end
-    return tot / m
 end
 
-function R2(actual, predicted)
-    @assert length(actual) == length(predicted)
-    ss_residual = sum((actual - predicted).^2)
-    ss_total = sum((actual .- mean(actual)).^2)
-    return 1.0 - ss_residual/ss_total
-end
-function R2(actual::Matrix, predicted::Vector)
-    @assert size(actual,1) == length(predicted)
-    ss_residual = mean_squared_error(actual, predicted)
-    ss_total = mean_squared_error(actual, repmat(mean(actual, 1), size(actual, 1), 1))
-    return 1.0 - ss_residual/ss_total
-end
-
-function _nfoldCV{T<:FloatingPoint, U<:Real}(regressor::Symbol, labels::Matrix{T}, features::Matrix{U}, args...)
-    nfolds = args[end]
-    if nfolds < 2
-        return nothing
-    end
-    if regressor == :tree
-        maxlabels = args[1]
-    elseif regressor == :forest
-        nsubfeatures = args[1]
-        ntrees = args[2]
-        maxlabels = args[3]
-        partialsampling = args[4]
-    end
-    N = size(labels,1)
-    ntest = _int(floor(N / nfolds))
-    inds = randperm(N)
-    R2s = zeros(nfolds)
-    for i in 1:nfolds
-        test_inds = falses(N)
-        test_inds[(i - 1) * ntest + 1 : i * ntest] = true
-        train_inds = !test_inds
-        test_features = features[inds[test_inds],:]
-        test_labels = labels[inds[test_inds], :]
-        train_features = features[inds[train_inds],:]
-        train_labels = labels[inds[train_inds], :]
-        if regressor == :tree
-            model = build_tree(train_labels, train_features, maxlabels, 0)
-            predictions = apply_tree(model, test_features)
-        elseif regressor == :forest
-            model = build_forest(train_labels, train_features, nsubfeatures, ntrees, maxlabels, partialsampling)
-            predictions = apply_forest(model, test_features)
-        end
-        err = mean_squared_error(test_labels, predictions)
-        corr = cor(test_labels, predictions)
-        r2 = R2(test_labels, predictions)
-        R2s[i] = r2
-        println("\nFold ", i)
-        println("Mean Squared Error:     ", err)
-        println("Correlation Coeff:      ", corr)
-        println("Coeff of Determination: ", r2)
-    end
-    println("\nMean Coeff of Determination: ", mean(R2s))
-    return R2s
-end
-
-function nfoldCV_tree{T<:FloatingPoint, U<:Real}(
-    labels::Matrix{T},
-    features::Matrix{U},
-    nfolds::Integer,
-    maxlabels::Integer=5
-    )
-
-    _nfoldCV(:tree, labels, features, maxlabels, nfolds)
-end
-function nfoldCV_forest{T<:FloatingPoint, U<:Real}(
-    labels::Matrix{T},
-    features::Matrix{U},
-    nsubfeatures::Integer,
-    ntrees::Integer,
-    nfolds::Integer,
-    maxlabels::Integer=5,
-    partialsampling=0.7)
-
-    _nfoldCV(:forest, labels, features, nsubfeatures, ntrees, maxlabels, partialsampling, nfolds)
-end
-
-# end # end module
+end # end module
