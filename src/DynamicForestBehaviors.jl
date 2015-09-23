@@ -11,8 +11,7 @@ export
 
     select_action,
     calc_action_loglikelihood,
-    train,
-    ntrees
+    train
 
 const FEATURE_EXTREMUM = 1000.0
 
@@ -35,8 +34,6 @@ type DynamicForestBehavior <: AbstractVehicleBehavior
         new(forest, indicators, X, A)
     end
 end
-
-ntrees(behavior::DynamicForestBehavior) = length(behavior.forest)
 
 function select_action(
     basics::FeatureExtractBasicsPdSet,
