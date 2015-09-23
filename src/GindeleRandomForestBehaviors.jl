@@ -1,4 +1,4 @@
-module GindeleRandomForestBehaviors
+    module GindeleRandomForestBehaviors
 
 using AutomotiveDrivingModels
 
@@ -13,29 +13,32 @@ export
     calc_action_loglikelihood,
     train
 
-#################
-
-# function append_to_python_searth_path( str::String )
-#     unshift!(PyVector(pyimport("sys")["path"]), str)
-# end
-# append_to_python_searth_path("/home/tim/Documents/wheelerworkspace/Bosch/model/")
-# @pyimport random_forests as random_forests
-
-#################
-
 const FEATURE_EXTREMUM = 1000.0
-
-const TRAIN_MAX_DEPTH = 5
-const TRAIN_MIN_SAMPLES_SPLIT = 100
-const TRAIN_MIN_SAMPLES_LEAVES = 20
-const TRAIN_MIN_SPLIT_IMPROVEMENT = 0.0
-const TRAIN_N_TREES = 10
-const TRAIN_PARTIAL_SAMPLING = 0.7
 
 type GindeleRandomForestBehavior <: AbstractVehicleBehavior
     model_μ::Ensemble
     model_Σ::Ensemble
     indicators::Vector{AbstractFeature}
+
+    # preallocated memory
+    μ::Vector{Float64} # [2]
+    Σ::Matrix{Float64} # [2×2]
+    X::Vector{Float64} # [n_indicators]
+    A::Vector{Float64} # [2]
+
+    function GindeleRandomForestBehavior(
+        model_μ::Ensemble,
+        model_Σ::Ensemble,
+        indicators::Vector{AbstractFeature}
+        )
+
+        μ = Array(Float64, 2)
+        Σ = Array(Float64, 2, 2)
+        X = Array(Float64, length(indicators))
+        A = Array(Float64, 2)
+
+        new(model_μ, model_Σ, indicators, μ, Σ, X, A)
+    end
 end
 
 function _calc_mvnormal(
@@ -45,22 +48,15 @@ function _calc_mvnormal(
     frameind::Int # TODO(tim): is validfind vs. frameind an issue here?
     )
 
-    indicators = behavior.indicators
-    observations = Features.observe(basics, carind, frameind, indicators)
-
-    X = Array(Float64, length(indicators))
-    for (i,feature) in enumerate(indicators)
-        X[i] = clamp(observations[symbol(feature)], -FEATURE_EXTREMUM, FEATURE_EXTREMUM)
+    Features.observe!(behavior.X, basics, carind, frameind, behavior.indicators)
+    for (i,v) in enumerate(behavior.X)
+        behavior.X[i] = clamp(v, -FEATURE_EXTREMUM, FEATURE_EXTREMUM)
     end
 
-    μ = vec(apply_forest(behavior.model_μ, X)) #vec(behavior.model_μ[:predict](X))
-    Σ = apply_forest(behavior.model_Σ, X)
+    apply_forest!(behavior.μ, behavior.model_μ, behavior.X)
+    apply_forest!(behavior.Σ, behavior.model_Σ, behavior.X)
 
-    # println(μ, "  ", typeof(μ))
-    # println(Σ, "  ", typeof(Σ))
-
-    # MvNormal(μ, full(behavior.model_Σ.Σ))
-    MvNormal(μ,Σ)
+    MvNormal(behavior.μ,behavior.Σ)
 end
 
 function select_action(
@@ -72,11 +68,11 @@ function select_action(
 
     normal = _calc_mvnormal(basics, behavior, carind, validfind)
 
-    action = rand(normal)
-    logl = logpdf(normal, action)
+    _rand!(normal, behavior.A)
+    logl = logpdf(normal, behavior.A)
 
-    action_lat = action[1]
-    action_lon = action[2]
+    action_lat = behavior.A[1]
+    action_lon = behavior.A[2]
 
     (action_lat, action_lon)
 end
@@ -95,8 +91,11 @@ function calc_action_loglikelihood(
     given the VehicleBehaviorGaussian.
     =#
 
+    behavior.A[1] = action_lat
+    behavior.A[2] = action_lon
+
     normal = _calc_mvnormal(basics, behavior, carind, validfind)
-    logpdf(normal, [action_lat, action_lon])
+    logpdf(normal, behavior.A)
 end
 function calc_action_loglikelihood(
     behavior::GindeleRandomForestBehavior,
@@ -106,21 +105,22 @@ function calc_action_loglikelihood(
 
     # TODO(tim): make this more memory efficient by preallocating
 
-    action_lat = features[frameind, symbol(FUTUREDESIREDANGLE_250MS)]::Float64
-    action_lon = features[frameind, symbol(FUTUREACCELERATION_250MS)]::Float64
+    behavior.A[1] = features[frameind, symbol(FUTUREDESIREDANGLE_250MS)]::Float64
+    behavior.A[2] = features[frameind, symbol(FUTUREACCELERATION_250MS)]::Float64
 
-    indicators = behavior.indicators
-
-    X = Array(Float64, length(indicators))
-    for (i,feature) in enumerate(indicators)
+    for (i,feature) in enumerate(behavior.indicators)
         v = features[frameind, symbol(feature)]::Float64
-        X[i] = clamp(v, -FEATURE_EXTREMUM, FEATURE_EXTREMUM)
+        behavior.X[i] = clamp(v, -FEATURE_EXTREMUM, FEATURE_EXTREMUM)
     end
 
-    μ = vec(apply_forest(behavior.model_μ, X))
-    Σ = apply_forest(behavior.model_Σ, X)
+    apply_forest!(behavior.μ, behavior.model_μ, behavior.X)
+    apply_forest!(behavior.Σ, behavior.model_Σ, behavior.X)
 
-    logpdf(MvNormal(μ,Σ), [action_lat, action_lon])
+    # TODO(tim): use preallocated memory
+    mvnorm_model = MvNormal(behavior.μ, behavior.Σ)
+
+    # can I compute logl without calling logpdf on MvNormal?
+    logpdf(mvnorm_model, behavior.A)
 end
 
 function train(::Type{GindeleRandomForestBehavior}, trainingframes::DataFrame;
@@ -130,8 +130,15 @@ function train(::Type{GindeleRandomForestBehavior}, trainingframes::DataFrame;
                     N_LANE_L, N_LANE_R, HAS_LANE_L, HAS_LANE_R, ACC, ACCFX, ACCFY,
                     A_REQ_STAYINLANE,
                  ],
-    ntrees::Integer = TRAIN_N_TREES,
-    max_depth::Integer = TRAIN_MAX_DEPTH,
+
+    ntrees::Integer=10,
+    max_depth::Integer=5,
+    min_samples_split::Integer=100,
+    min_samples_leaves::Integer=20,
+    min_split_improvement::Float64=0.0,
+    partial_sampling::Float64=0.7,
+    feautre_extremem::Float64=1000.0,
+
     args::Dict=Dict{Symbol,Any}()
     )
 
@@ -142,6 +149,16 @@ function train(::Type{GindeleRandomForestBehavior}, trainingframes::DataFrame;
             ntrees = v
         elseif k == :max_depth
             max_depth = v
+        elseif k == :min_samples_split
+            min_samples_split = v
+        elseif k == :min_samples_leaves
+            min_samples_leaves = v
+        elseif k == :min_split_improvement
+            min_split_improvement = v
+        elseif k == :partial_sampling
+            partial_sampling = v
+        elseif k == :feautre_extremem
+            feautre_extremem = v
         else
             warn("Train GindeleRandomForestBehavior: ignoring $k")
         end
@@ -150,9 +167,9 @@ function train(::Type{GindeleRandomForestBehavior}, trainingframes::DataFrame;
     build_tree_params = BuildTreeParameters(
         nsubfeatures=int(sqrt(length(indicators))),
         max_depth=max_depth,
-        min_samples_split=TRAIN_MIN_SAMPLES_SPLIT,
-        min_samples_leaves=TRAIN_MIN_SAMPLES_LEAVES,
-        min_split_improvement=TRAIN_MIN_SPLIT_IMPROVEMENT,
+        min_samples_split=min_samples_split,
+        min_samples_leaves=min_samples_leaves,
+        min_split_improvement=min_split_improvement,
         loss_function=LossFunction_MSE,
         leaf_type=MvNormLeaf)
 
@@ -187,7 +204,7 @@ function train(::Type{GindeleRandomForestBehavior}, trainingframes::DataFrame;
     y = y[:, 1:total]::Matrix{Float64}
     X = X[1:total, :]::Matrix{Float64}
 
-    μ = build_forest(y, X, ntrees, build_tree_params, TRAIN_PARTIAL_SAMPLING)
+    μ = build_forest(y, X, ntrees, build_tree_params, partial_sampling)
 
     # TODO(tim): do I need to deepcopy y instead?
     for i = 1 : size(y, 1)
@@ -197,13 +214,13 @@ function train(::Type{GindeleRandomForestBehavior}, trainingframes::DataFrame;
     build_tree_params = BuildTreeParameters(
         nsubfeatures=int(sqrt(length(indicators))),
         max_depth=max_depth,
-        min_samples_split=TRAIN_MIN_SAMPLES_SPLIT,
-        min_samples_leaves=TRAIN_MIN_SAMPLES_LEAVES,
-        min_split_improvement=TRAIN_MIN_SPLIT_IMPROVEMENT,
-        loss_function=LossFunction_LOGL,
+        min_samples_split=min_samples_split,
+        min_samples_leaves=min_samples_leaves,
+        min_split_improvement=min_split_improvement,
+        loss_function=LossFunction_LOGL_MEAN_SUBTRACTED,
         leaf_type=MvNormLeaf)
 
-    Σ = build_forest_covariance(y, X, ntrees, build_tree_params, TRAIN_PARTIAL_SAMPLING)
+    Σ = build_forest(y, X, ntrees, build_tree_params, partial_sampling)
 
     GindeleRandomForestBehavior(μ, Σ, indicators)
 end

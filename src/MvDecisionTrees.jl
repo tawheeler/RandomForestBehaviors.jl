@@ -4,6 +4,7 @@ export
     LossFunction,
     LossFunction_MSE,
     LossFunction_LOGL,
+    LossFunction_LOGL_MEAN_SUBTRACTED,
 
     Leaf,
     MeanVecLeaf,
@@ -17,7 +18,7 @@ export
     depth,
     print_tree,
     apply_tree,
-    apply_forest,
+    apply_forest!,
 
     build_leaf,
     build_tree,
@@ -36,7 +37,7 @@ end
 abstract LossFunction
 type LossFunction_MSE<:LossFunction end # mean squared error loss function
 type LossFunction_LOGL<:LossFunction end # log likelihood loss function
-     # NOTE(tim): to use this you must subtract the predicted mean from your labels
+type LossFunction_LOGL_MEAN_SUBTRACTED<:LossFunction end # log likelihood loss function where labels already has predicted mean subtracted
 
 abstract Leaf
 immutable MeanVecLeaf{T<:FloatingPoint} <: Leaf
@@ -88,6 +89,14 @@ function build_tree_parameters{F<:LossFunction, LeafType<:Leaf}(;
                min_samples_leaves, min_split_improvement, loss_function, leaf_type)
 end
 
+type PreallocatedLearningMemory{T<:FloatingPoint}
+    μ_l::Vector{T} # n
+    μ_r::Vector{T} # n
+    Σ_l::Matrix{T} # n×n
+    Σ_r::Matrix{T} # n×n
+    subfeature_indeces::Vector{Int}
+end
+
 function Base.print(io::IO, params::BuildTreeParameters)
     println(io, "BuildTreeParameters:")
     @printf(io, "\tnsubfeatures:          %8d\n", params.nsubfeatures)
@@ -134,31 +143,48 @@ function apply_tree(tree::Node, features::Vector)
     end
 end
 
-function apply_forest{T<:Any, LeafType<:MeanVecLeaf}(forest::Ensemble{T,LeafType}, features::Vector)
+function apply_forest!{T<:Any, LeafType<:MeanVecLeaf}(μ::Vector{T}, forest::Ensemble{T,LeafType}, features::Vector)
+
+    # return the mean among tree's observations
 
     ntrees = length(forest)
+    o = length(μ)
 
-    mean_vec = deepcopy(apply_tree(forest.trees[1], features))
-    for i in 2 : ntrees
-        mean_vec += apply_tree(forest.trees[i], features)
+    for i in 1 : o
+        μ[i] = 0.0
     end
-    for i in 1 : length(mean_vec)
-        mean_vec[i] /= ntrees
+    for i in 1 : ntrees
+        leaf = apply_tree(forest.trees[i], features)::MeanVecLeaf
+        for j in 1 : o
+            μ[i] +=leaf.μ[i]
+        end
     end
-    mean_vec
+    for i in 1 : o
+        μ[i] /= ntrees
+    end
+    μ
 end
-function apply_forest{T<:Any, LeafType<:CovLeaf}(forest::Ensemble{T,LeafType}, features::Vector)
+function apply_forest!{T<:Any, LeafType<:CovLeaf}(Σ::Matrix{T}, forest::Ensemble{T,LeafType}, features::Vector)
+
+    # return the mean covariance matrix among the tree's covariances
 
     ntrees = length(forest)
+    len = length(Σ)
 
-    mean_cov = deepcopy(apply_tree(forest.trees[1], features))
-    for i in 2 : ntrees
-        mean_cov += apply_tree(forest.trees[i], features)
+    for i in 1 : len
+        Σ[i] = 0.0
     end
-    for i in 1 : length(mean_cov)
-        mean_cov[i] /= ntrees
+    for i in 1 : ntrees
+        leaf = apply_tree(forest.trees[i], features)::CovLeaf
+        for j in 1 : len
+            Σ[j] += leaf.Σ[j]
+        end
     end
-    mean_cov
+    for i in 1 : len
+        Σ[i] /= ntrees
+    end
+
+    Σ
 end
 
 ### Regression ###
@@ -189,7 +215,7 @@ function _reservoir_sample!(indeces::Vector{Int}, n::Int, k::Int=length(indeces)
     indeces
 end
 
-function _calc_covariance!{T<:FloatingPoint}(
+function _calc_covariance_mean_subtracted!{T<:FloatingPoint}(
     Σ::Matrix{T},
     labels::Matrix{T},
     assignment::Vector{Int},
@@ -235,6 +261,20 @@ function _calc_covariance!{T<:FloatingPoint}(
     Σ
 end
 
+function _fast_det{T<:FloatingPoint}(M::AbstractMatrix{T})
+    n = size(M,1)
+    if n == 1
+        Σ[1]
+    elseif n == 2
+        Σ[1]*Σ[4] - Σ[2]*Σ[3]
+    elseif n == 3
+        Σ[1]*Σ[5]*Σ[9] + Σ[4]*Σ[8]*Σ[3] + Σ[7]*Σ[2]*Σ[6] -
+            Σ[7]*Σ[5]*Σ[3] - Σ[4]*Σ[2]*Σ[9] - Σ[1]*Σ[8]*Σ[6]
+    else
+        det(Σ)
+    end
+end
+
 function loss{T<:FloatingPoint, U<:Real}(
     ::Type{LossFunction_MSE},
     labels::Matrix{T}, # [n_observations × n_rows]
@@ -243,13 +283,15 @@ function loss{T<:FloatingPoint, U<:Real}(
     assignment::Vector{Int}, # [n_rows]
     assignment_id::Int,
     thresh::T,
-    Σ_l::Matrix{T},
-    Σ_r::Matrix{T},
+    mem::PreallocatedLearningMemory,
     )
 
     # mse loss for a vector is tr{E{(y-p)(y-p)ᵀ}}
     # where y is the label
     # and p is the prediction - the average of labels on that side of the threshold
+
+    Σ_l = mem.Σ_l
+    Σ_r = mem.Σ_r
 
     n, m = size(labels) # n_samples, n_outcomes
     mse = 0.0
@@ -282,13 +324,14 @@ function loss{T<:FloatingPoint}(
     labels::Matrix{T},
     assignment::Vector{Int}, # [n_rows]
     assignment_id::Int,
-    Σ::Matrix{T}
+    mem::PreallocatedLearningMemory,
     )
 
     # mse loss for a vector is tr{E{(y-p)(y-p)ᵀ}}
     # where y is the label
     # and p is the prediction - the average of labels on that side of the threshold
 
+    Σ = mem.Σ_l
     n, m = size(labels) # n_samples, n_outcomes
     mse = 0.0
 
@@ -315,13 +358,212 @@ function loss{T<:FloatingPoint, U<:Real}(
     assignment::Vector{Int}, # [n_rows]
     assignment_id::Int,
     thresh::T,
-    Σ_l::Matrix{T}, # n×n
-    Σ_r::Matrix{T}, # n×n
+    mem::PreallocatedLearningMemory,
+    )
+
+    μ_l = mem.μ_l
+    μ_r = mem.μ_r
+    Σ_l = mem.Σ_l
+    Σ_r = mem.Σ_r
+
+    n, m = size(labels)
+    nl, nr = 0, 0
+
+    # compute the mean
+    for i = 1 : n
+        μ_l[i] = 0.0
+        μ_r[i] = 0.0
+    end
+    for i = 1 : m
+        if assignment[i] == assignment_id
+            if features[i,feature_index] < thresh
+                nl += 1
+                for a = 1 : n
+                    μ_l[a] += labels[a,i]
+                end
+            else
+                nr += 1
+                for a = 1 : n
+                    μ_r[a] += labels[a,i]
+                end
+            end
+        end
+    end
+    if nl < 2 || nr < 2
+        # NOTE(tim): force at least two samples on each side to ensure proper covariance matrix
+        return (-Inf, nl, nr)
+    end
+    for i = 1 : n
+        μ_l[i] /= nl
+        μ_r[i] /= nr
+    end
+
+    # solve for upper triangle of symmetric covariance matrix
+    for i = 1 : n*n
+        Σ_l[i] = 0.0
+        Σ_r[i] = 0.0
+    end
+    for i = 1 : m
+        if assignment[i] == assignment_id
+            if features[i,feature_index] < thresh
+                for a = 1 : n
+                    l = labels[a,i] - μ_l[a]
+                    for b = a : n
+                        Σ_l[a,b] += l*(labels[b,i] - μ_l[b])
+                    end
+                end
+            else
+                for a = 1 : n
+                    l = labels[a,i] - μ_r[a]
+                    for b = a : n
+                        Σ_r[a,b] += l*(labels[b,i] - μ_r[b])
+                    end
+                end
+            end
+        end
+    end
+    for i = 1 : n*n
+        Σ_l[i] /= (nl-1)
+        Σ_r[i] /= (nr-1)
+    end
+    for a = 2:n
+        # copy over symmetric component
+        for b = 1:a-1
+            Σ_l[a,b] = Σ_l[b,a]
+            Σ_r[a,b] = Σ_r[b,a]
+        end
+    end
+
+    logdetΣ_l = log(max(_fast_det(Σ_l), 1e-20))
+    logdetΣ_r = log(max(_fast_det(Σ_r), 1e-20))
+
+    # compute log likelihood score under gaussian distribution
+    # NOTE: does not compute the true logl likelihood
+    #       computation ignores constant components
+    logl = 0.0
+    for i = 1 : m
+        if assignment[i] == assignment_id
+            if features[i] < thresh
+                logl -= logdetΣ_l
+                for a = 1 : n
+                    subval = 0.0
+                    for b = 1 : n
+                        subval += Σ_l[a,b]*(labels[b,i] - μ_l[b])
+                    end
+                    logl -= subval*(labels[a,i] - μ_l[a])
+                end
+            else
+                logl -= logdetΣ_r
+                for a = 1 : n
+                    subval = 0.0
+                    for b = 1 : n
+                        subval += Σ_r[a,b]*(labels[b,i] - μ_r[b])
+                    end
+                    logl -= subval*(labels[a,i] - μ_r[a])
+                end
+            end
+        end
+    end
+
+    return (logl, nl, nr)
+end
+function loss{T<:FloatingPoint}(
+    ::Type{LossFunction_LOGL},
+    labels::Matrix{T}, # [n_observations × n_rows]
+    assignment::Vector{Int}, # [n_rows]
+    assignment_id::Int,
+    mem::PreallocatedLearningMemory,
+    )
+
+    μ = mem.μ_l
+    Σ = mem.Σ_l
+
+    n, m = size(labels)
+    m_assigned = 0
+
+    # compute the sample mean
+    for i = 1 : n
+        μ[i] = 0.0
+    end
+    for i = 1 : m
+        if assignment[i] == assignment_id
+            m_assigned += 1
+            for a = 1 : n
+                μ[i] += labels[a,i]
+            end
+        end
+    end
+    if m_assigned ≤ 2
+        # insufficient entries to split
+        return -Inf
+    end
+    for i = 1 : n
+        μ[i] /= m_assigned
+    end
+
+    # compute covariance matrix
+
+    for i = 1 : n*n
+        Σ[i] = 0.0
+    end
+    for i = 1 : m
+        if assignment[i] == assignment_id
+            for a = 1 : n
+                l = labels[a,i] - μ[a]
+                for b = a : n
+                    Σ[a,b] += l*(labels[b,i] - μ[b])
+                end
+            end
+        end
+    end
+    for i = 1 : n*n
+        Σ[i] /= (m_assigned-1)
+    end
+    for a = 2:n
+        # copy over symmetric component
+        for b = 1:a-1
+            Σ[a,b] = Σ[b,a]
+        end
+    end
+
+    logdetΣ = log(max(_fast_det(Σ), 1e-20))
+
+    # compute log likelihood score under gaussian distribution
+    # NOTE: does not compute the true logl likelihood
+    #       computation ignores constant components
+    logl = 0.0
+    for i = 1 : m
+        if assignment[i] == assignment_id
+            logl -= logdetΣ
+            for a = 1 : n
+                subval = 0.0
+                for b = 1 : n
+                    subval += Σ[a,b]*(labels[b,i] - μ[b])
+                end
+                logl -= subval*(labels[a,i] - μ[a])
+            end
+        end
+    end
+    logl
+end
+
+function loss{T<:FloatingPoint, U<:Real}(
+    ::Type{LossFunction_LOGL_MEAN_SUBTRACTED},
+    labels::Matrix{T}, # [n_observations × n_rows]
+    features::Matrix{U}, # [n_rows × n_features]
+    feature_index::Integer,
+    assignment::Vector{Int}, # [n_rows]
+    assignment_id::Int,
+    thresh::T,
+    mem::PreallocatedLearningMemory,
     )
 
     # labels is n_samples × n_outcomes and contains the distance from the mean, x-μ
     # we want to predict the covariance matrix Σ, which is determined by the covariance
     # of the samples in a leaf
+
+    Σ_l = mem.Σ_l
+    Σ_r = mem.Σ_r
 
     n, m = size(labels)
 
@@ -336,7 +578,6 @@ function loss{T<:FloatingPoint, U<:Real}(
     for i = 1 : m
         if assignment[i] == assignment_id
             if features[i,feature_index] < thresh
-                println("adding ", labels[:,i], " to left")
                 for a = 1 : n
                     l = labels[a,i]
                     for b = a : n
@@ -345,7 +586,6 @@ function loss{T<:FloatingPoint, U<:Real}(
                 end
                 nl += 1
             else
-                println("adding ", labels[:,i], " to right")
                 for a = 1 : n
                     l = labels[a,i]
                     for b = a : n
@@ -366,7 +606,7 @@ function loss{T<:FloatingPoint, U<:Real}(
         return (-Inf, nl, nr)
     end
 
-    # move copy over symmetric component
+    # copy over symmetric component
     for a = 2:n
         for b = 1:a-1
             Σ_l[a,b] = Σ_l[b,a]
@@ -374,36 +614,8 @@ function loss{T<:FloatingPoint, U<:Real}(
         end
     end
 
-    println(Σ_l)
-    println(Σ_r)
-
-    detΣ_l = let
-        if n == 1
-            Σ_l[1]
-        elseif n == 2
-            Σ_l[1]*Σ_l[4] - Σ_l[2]*Σ_l[3]
-        elseif n == 3
-            Σ_l[1]*Σ_l[5]*Σ_l[9] + Σ_l[4]*Σ_l[8]*Σ_l[3] + Σ_l[7]*Σ_l[2]*Σ_l[6] -
-                Σ_l[7]*Σ_l[5]*Σ_l[3] - Σ_l[4]*Σ_l[2]*Σ_l[9] - Σ_l[1]*Σ_l[8]*Σ_l[6]
-        else
-            det(Σ_l)
-        end
-    end
-    detΣ_r = let
-        if n == 1
-            Σ_r[1]
-        elseif n == 2
-            Σ_r[1]*Σ_r[4] - Σ_r[2]*Σ_r[3]
-        elseif n == 3
-            Σ_r[1]*Σ_r[5]*Σ_r[9] + Σ_r[4]*Σ_r[8]*Σ_r[3] + Σ_r[7]*Σ_r[2]*Σ_r[6] -
-                Σ_r[7]*Σ_r[5]*Σ_r[3] - Σ_r[4]*Σ_r[2]*Σ_r[9] - Σ_r[1]*Σ_r[8]*Σ_r[6]
-        else
-            det(Σ_r)
-        end
-    end
-
-    logdetΣ_l = log(max(detΣ_l, 1e-20))
-    logdetΣ_r = log(max(detΣ_r, 1e-20))
+    logdetΣ_l = log(max(_fast_det(Σ_l), 1e-20))
+    logdetΣ_r = log(max(_fast_det(Σ_r), 1e-20))
 
     # compute log likelihood (we seek to maximize it)
     # NOTE: ignores constant components
@@ -435,17 +647,18 @@ function loss{T<:FloatingPoint, U<:Real}(
     return (logl, nl, nr)
 end
 function loss{T<:FloatingPoint}(
-    ::Type{LossFunction_LOGL},
+    ::Type{LossFunction_LOGL_MEAN_SUBTRACTED},
     labels::Matrix{T}, # [n_observations × n_rows]
     assignment::Vector{Int}, # [n_rows]
     assignment_id::Int,
-    Σ::Matrix{T},
+    mem::PreallocatedLearningMemory,
     )
 
     # labels is n_samples × n_outcomes and contains the distance from the mean, x-μ
     # we want to predict the covariance matrix Σ, which is determined by the covariance
     # of the samples in a leaf
 
+    Σ = mem.Σ_l
     n, m = size(labels)
 
     for i = 1 : n*n
@@ -481,23 +694,11 @@ function loss{T<:FloatingPoint}(
         end
     end
 
+    logdetΣ = log(max(_fast_det(Σ), 1e-20))
 
-    detΣ = let
-        if n == 1
-            Σ[1]
-        elseif n == 2
-            Σ[1]*Σ[4] - Σ[2]*Σ[3]
-        elseif n == 3
-            Σ[1]*Σ[5]*Σ[9] + Σ[4]*Σ[8]*Σ[3] + Σ[7]*Σ[2]*Σ[6] -
-                Σ[7]*Σ[5]*Σ[3] - Σ[4]*Σ[2]*Σ[9] - Σ[1]*Σ[8]*Σ[6]
-        else
-            det(Σ)
-        end
-    end
-    logdetΣ = log(max(detΣ, 1e-20))
-
-    # compute log likelihood (we seek to maximize it)
-    # NOTE: ignores constant components
+    # compute log likelihood score under gaussian distribution
+    # NOTE: does not compute the true logl likelihood
+    #       computation ignores constant components
     logl = 0.0
     for i = 1 : m
         if assignment[i] == assignment_id
@@ -523,21 +724,19 @@ function _split{F<:LossFunction, T<:FloatingPoint, U<:Real}(
     min_samples_leaves::Int,
     min_split_improvement::Float64,
     loss_function::Type{F},
-    Σ_l::Matrix{T}, # n×n
-    Σ_r::Matrix{T}, # n×n
-    subfeature_indeces::Vector{Int},
+    mem::PreallocatedLearningMemory,
     )
 
     # returns a tuple: (index_of_feature_we_split_over, threshold)
 
     nrow, nfeatures = size(features)
     best = (0,0)
-    best_loss = loss(loss_function, labels, assignment, assignment_id, Σ_l) + min_split_improvement
+    best_loss = loss(loss_function, labels, assignment, assignment_id, mem) + min_split_improvement
     n_thresholds = min(nrow-1, 10)
 
-    _reservoir_sample!(subfeature_indeces, nfeatures)
+    _reservoir_sample!(mem.subfeature_indeces, nfeatures)
 
-    for i in subfeature_indeces
+    for i in mem.subfeature_indeces
 
         f_lo = Inf
         f_hi = -Inf
@@ -556,7 +755,7 @@ function _split{F<:LossFunction, T<:FloatingPoint, U<:Real}(
 
             thresh = f_lo + (f_hi - f_lo)*(j/(n_thresholds+1))
 
-            value, num_left, num_right = loss(loss_function, labels, features, i, assignment, assignment_id, thresh, Σ_l, Σ_r)
+            value, num_left, num_right = loss(loss_function, labels, features, i, assignment, assignment_id, thresh, mem)
 
             if value > best_loss && num_left ≥ min_samples_leaves && num_right ≥ min_samples_leaves
                 best_loss = value
@@ -608,7 +807,7 @@ function build_leaf{T<:FloatingPoint}(
     Construct a leaf whose payload is the covariance matrix for all samples within it
     =#
 
-    CovLeaf(_calc_covariance!(zeros(T, o, o), labels, assignment, assignment_id))
+    CovLeaf(_calc_covariance_mean_subtracted!(zeros(T, o, o), labels, assignment, assignment_id))
 end
 function build_leaf{T<:FloatingPoint}(
     ::Type{MvNormLeaf},
@@ -678,9 +877,7 @@ function _build_tree{T<:FloatingPoint, U<:Real}(
     assignment::Vector{Int}, # [n_rows+1], last element contains the max id
     assignment_id::Int,
     params::BuildTreeParameters,
-    Σ_l::Matrix{T}, # n×n
-    Σ_r::Matrix{T}, # n×n
-    subfeature_indeces::Vector{Int},
+    mem::PreallocatedLearningMemory,
     _depth::Int=0,
     )
 
@@ -698,7 +895,7 @@ function _build_tree{T<:FloatingPoint, U<:Real}(
                         params.min_samples_leaves,
                         params.min_split_improvement,
                         params.loss_function,
-                        Σ_l, Σ_r, subfeature_indeces
+                        mem
                         )
 
     if id == 0
@@ -716,24 +913,25 @@ function _build_tree{T<:FloatingPoint, U<:Real}(
     end
 
     return Node(id, thresh,
-                _build_tree(labels, features, assignment, next_id,       params, Σ_l, Σ_r, subfeature_indeces, _depth+1),
-                _build_tree(labels, features, assignment, assignment_id, params, Σ_l, Σ_r, subfeature_indeces, _depth+1))
+                _build_tree(labels, features, assignment, next_id,       params, mem, _depth+1),
+                _build_tree(labels, features, assignment, assignment_id, params, mem, _depth+1))
 end
 function build_tree{T<:FloatingPoint, U<:Real}(labels::Matrix{T}, features::Matrix{U}, params::BuildTreeParameters)
 
     o = size(labels,1)
-    Σ_l = zeros(o,o)
-    Σ_r = zeros(o,o)
+    μ_l = Array(T, o)
+    μ_r = Array(T, o)
+    Σ_l = Array(T, o,o)
+    Σ_r = Array(T, o,o)
 
     nfeatures = size(features,2)
     nsubfeatures = params.nsubfeatures > 0 ? min(params.nsubfeatures, nfeatures) : nfeatures
     subfeature_indeces = Array(Int, nsubfeatures)
     assignment = ones(Int, n+1)
 
-    _build_tree(
-        labels, features, assignment, 1,
-        params, Σ_l, Σ_r, subfeature_indeces
-        )
+    mem = PreallocatedLearningMemory{T}(μ_l, μ_r, Σ_l, Σ_r, subfeature_indeces)
+
+    _build_tree(labels, features, assignment, 1, params, mem)
 end
 
 function _build_forest_parallel{T<:FloatingPoint, U<:Real}(labels::Matrix{T}, features::Matrix{U}, ntrees::Integer, params::BuildTreeParameters, partialsampling::Float64)
@@ -749,14 +947,18 @@ end
 function _build_forest_serial{T<:FloatingPoint, U<:Real}(labels::Matrix{T}, features::Matrix{U}, ntrees::Integer, params::BuildTreeParameters, partialsampling::Float64)
 
     o, nlabels = size(labels)
-    Σ_l = zeros(o,o)
-    Σ_r = zeros(o,o)
+    μ_l = Array(T, o)
+    μ_r = Array(T, o)
+    Σ_l = Array(T, o,o)
+    Σ_r = Array(T, o,o)
 
     nfeatures = size(features,2)
     nsubfeatures = params.nsubfeatures > 0 ? min(params.nsubfeatures, nfeatures) : nfeatures
     subfeature_indeces = Array(Int, nsubfeatures)
     assignment = ones(Int, n+1)
     nsamples = _int(partialsampling * nlabels)
+
+    mem = PreallocatedLearningMemory{T}(μ_l, μ_r, Σ_l, Σ_r, subfeature_indeces)
 
     forest = Array(params.leaf_type, ntrees)
     for i = 1 : ntrees
@@ -768,10 +970,7 @@ function _build_forest_serial{T<:FloatingPoint, U<:Real}(labels::Matrix{T}, feat
         end
 
         # build the tree
-        forest[i] = _build_tree(
-                        labels, features, assignment, 1,
-                        params, Σ_l, Σ_r, subfeature_indeces
-                        )
+        forest[i] = _build_tree(labels, features, assignment, 1, params, mem)
     end
 
     Ensemble([forest;])

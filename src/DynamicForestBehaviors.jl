@@ -16,42 +16,25 @@ export
 
 const FEATURE_EXTREMUM = 1000.0
 
-const TRAIN_MAX_DEPTH = 5
-const TRAIN_MIN_SAMPLES_SPLIT = 100
-const TRAIN_MIN_SAMPLES_LEAVES = 20
-const TRAIN_MIN_SPLIT_IMPROVEMENT = 0.0
-const TRAIN_N_TREES = 10
-const TRAIN_PARTIAL_SAMPLING = 0.7
-
 type DynamicForestBehavior <: AbstractVehicleBehavior
     forest::Ensemble
     indicators::Vector{AbstractFeature}
+
+    # preallocated memory
+    X::Vector{Float64} # [n_indicators]
+    A::Vector{Float64} # [2]
+
+    function DynamicForestBehavior(
+        forest::Ensemble,
+        indicators::Vector{AbstractFeature}
+        )
+
+        X = Array(Float64, length(indicators))
+        A = Array(Float64, 2)
+
+        new(forest, indicators, X, A)
+    end
 end
-
-# function _calc_mvnormal(
-#     basics::FeatureExtractBasicsPdSet,
-#     behavior::DynamicForestBehavior,
-#     carind::Int,
-#     frameind::Int
-#     )
-
-#     indicators = behavior.indicators
-#     observations = Features.observe(basics, carind, frameind, indicators)
-
-#     X = Array(Float64, length(indicators))
-#     for (i,feature) in enumerate(indicators)
-#         X[i] = clamp(observations[symbol(feature)], -FEATURE_EXTREMUM, FEATURE_EXTREMUM)
-#     end
-
-#     μ = vec(apply_forest(behavior.model_μ, X)) #vec(behavior.model_μ[:predict](X))
-#     Σ = apply_forest(behavior.model_Σ, X)
-
-#     # println(μ, "  ", typeof(μ))
-#     # println(Σ, "  ", typeof(Σ))
-
-#     # MvNormal(μ, full(behavior.model_Σ.Σ))
-#     MvNormal(μ,Σ)
-# end
 
 ntrees(behavior::DynamicForestBehavior) = length(behavior.forest)
 
@@ -65,17 +48,17 @@ function select_action(
     # pick a tree at random
     tree_index = rand(1:length(behavior.forest))
 
-    # sample from the covariance matrix for said tree
+    # sample from the MvNorm for said tree
     frameind = validfind2frameind(basics.pdset, validfind)
-    observations = Features.observe(basics, carind, frameind, indicators)
-    leaf = apply_tree(behavior.forest[tree_index], observations)
-    normal  = leaf.majority
+    Features.observe!(behavior.X, basics, carind, frameind, indicators)
+    leaf = apply_tree(behavior.forest[tree_index], behavior.X)::MvNormLeaf
+    normal  = leaf.m
 
-    action = rand(normal)
-    logl = logpdf(normal, action)
+    _rand!(normal, behavior.A)
+    logl = logpdf(normal, behavior.A)
 
-    action_lat = action[1]
-    action_lon = action[2]
+    action_lat = behavior.A[1]
+    action_lon = behavior.A[2]
 
     (action_lat, action_lon)
 end
@@ -94,16 +77,20 @@ function calc_action_loglikelihood(
     given the VehicleBehaviorGaussian.
     =#
 
-    # pick a tree at random
-    tree_index = rand(1:length(behavior.forest))
-
-    # sample from the covariance matrix for said tree
     frameind = validfind2frameind(basics.pdset, validfind)
-    observations = Features.observe(basics, carind, frameind, indicators)
-    leaf = apply_tree(behavior.forest[tree_index], observations)
-    normal  = leaf.majority
+    Features.observe!(behavior.X, basics, carind, frameind, indicators)
 
-    logpdf(normal, [action_lat, action_lon])
+    behavior.A[1] = action_lat
+    behavior.A[2] = action_lon
+
+    ntrees = length(behavior.forest)
+    logl = -ntrees*log(ntrees) # term for the probability of selecting a given mixture component (uniform)
+    for tree_index in 1 : ntrees
+        leaf = apply_tree(behavior.forest[tree_index], behavior.X)::MvNormLeaf
+        normal  = leaf.m
+        logl += logpdf(normal, behavior.A)
+    end
+    logl
 end
 function calc_action_loglikelihood(
     behavior::DynamicForestBehavior,
@@ -113,27 +100,25 @@ function calc_action_loglikelihood(
 
     # TODO(tim): make this more memory efficient by preallocating
 
-    action_lat = features[frameind, symbol(FUTUREDESIREDANGLE_250MS)]::Float64
-    action_lon = features[frameind, symbol(FUTUREACCELERATION_250MS)]::Float64
+    behavior.A[1] = features[frameind, symbol(FUTUREDESIREDANGLE_250MS)]::Float64
+    behavior.A[2] = features[frameind, symbol(FUTUREACCELERATION_250MS)]::Float64
 
-    indicators = behavior.indicators
-
-    observations = Array(Float64, length(indicators))
-    for (i,feature) in enumerate(indicators)
+    for (i,feature) in enumerate(behavior.indicators)
         v = features[frameind, symbol(feature)]::Float64
-        observations[i] = clamp(v, -FEATURE_EXTREMUM, FEATURE_EXTREMUM)
+        behavior.X[i] = clamp(v, -FEATURE_EXTREMUM, FEATURE_EXTREMUM)
     end
 
-    # pick a tree at random
-    tree_index = rand(1:length(behavior.forest))
+    behavior.A[1] = action_lat
+    behavior.A[2] = action_lon
 
-    # sample from the covariance matrix for said tree
-    frameind = validfind2frameind(basics.pdset, validfind)
-    observations = Features.observe(basics, carind, frameind, indicators)
-    leaf = apply_tree(behavior.forest[tree_index], observations)
-    normal  = leaf.majority
-
-    logpdf(normal, [action_lat, action_lon])
+    ntrees = length(behavior.forest)
+    logl = -ntrees*log(ntrees) # term for the probability of selecting a given mixture component (uniform)
+    for tree_index in 1 : ntrees
+        leaf = apply_tree(behavior.forest[tree_index], behavior.X)::MvNormLeaf
+        normal  = leaf.m
+        logl += logpdf(normal, behavior.A)
+    end
+    logl
 end
 
 function train(::Type{DynamicForestBehavior}, trainingframes::DataFrame;
@@ -145,8 +130,15 @@ function train(::Type{DynamicForestBehavior}, trainingframes::DataFrame;
                     HAS_FRONT, D_X_FRONT, D_Y_FRONT, V_X_FRONT, V_Y_FRONT, TTC_X_FRONT,
                     A_REQ_FRONT, TIMEGAP_X_FRONT,
                  ],
-    ntrees::Integer = TRAIN_N_TREES,
-    max_depth::Integer = TRAIN_MAX_DEPTH,
+
+    ntrees::Integer=10,
+    max_depth::Integer=5,
+    min_samples_split::Integer=100,
+    min_samples_leaves::Integer=20,
+    min_split_improvement::Float64=0.0,
+    partial_sampling::Float64=0.7,
+    feautre_extremem::Float64=1000.0,
+
     args::Dict=Dict{Symbol,Any}()
     )
 
@@ -157,6 +149,16 @@ function train(::Type{DynamicForestBehavior}, trainingframes::DataFrame;
             ntrees = v
         elseif k == :max_depth
             max_depth = v
+        elseif k == :min_samples_split
+            min_samples_split = v
+        elseif k == :min_samples_leaves
+            min_samples_leaves = v
+        elseif k == :min_split_improvement
+            min_split_improvement = v
+        elseif k == :partial_sampling
+            partial_sampling = v
+        elseif k == :feautre_extremem
+            feautre_extremem = v
         else
             warn("Train DynamicForestBehavior: ignoring $k")
         end
@@ -165,10 +167,10 @@ function train(::Type{DynamicForestBehavior}, trainingframes::DataFrame;
     build_tree_params = BuildTreeParameters(
         nsubfeatures=int(sqrt(length(indicators))),
         max_depth=max_depth,
-        min_samples_split=TRAIN_MIN_SAMPLES_SPLIT,
-        min_samples_leaves=TRAIN_MIN_SAMPLES_LEAVES,
-        min_split_improvement=TRAIN_MIN_SPLIT_IMPROVEMENT,
-        loss_function=LossFunction_MSE,
+        min_samples_split=min_samples_split,
+        min_samples_leaves=min_samples_leaves,
+        min_split_improvement=min_split_improvement,
+        loss_function=LossFunction_LOGL,
         leaf_type=MvNormLeaf
         )
 
@@ -204,9 +206,9 @@ function train(::Type{DynamicForestBehavior}, trainingframes::DataFrame;
     X = X[1:total, :]::Matrix{Float64}
 
     # TODO(tim): build a forest whose nodes are MvNormals
-    μ = build_forest(y, X, ntrees, build_tree_params, TRAIN_PARTIAL_SAMPLING)
+    ensemble = build_forest(y, X, ntrees, build_tree_params, partial_sampling)
 
-    DynamicForestBehavior(μ, Σ, indicators)
+    DynamicForestBehavior(ensemble, indicators)
 end
 
 end # end module
