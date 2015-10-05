@@ -46,13 +46,11 @@ function select_action(
     tree_index = rand(1:length(behavior.forest.trees))
 
     # sample from the MvNorm for said tree
-    frameind = validfind2frameind(basics.pdset, validfind)
-    Features.observe!(behavior.X, basics, carind, frameind, behavior.indicators)
+    Features.observe!(behavior.X, basics, carind, validfind, behavior.indicators)
     leaf = apply_tree(behavior.forest.trees[tree_index], behavior.X)::MvNormLeaf
     normal  = leaf.m
 
-    _rand!(normal, behavior.A)
-    logl = logpdf(normal, behavior.A)
+    Distributions._rand!(normal, behavior.A)
 
     action_lat = behavior.A[1]
     action_lon = behavior.A[2]
@@ -60,6 +58,38 @@ function select_action(
     (action_lat, action_lon)
 end
 
+function _calc_action_loglikelihood(
+    behavior::DynamicForestBehavior,
+    action_lat::Float64,
+    action_lon::Float64
+    )
+
+    behavior.A[1] = action_lat
+    behavior.A[2] = action_lon
+
+    total_probability = 0.0
+    logl = 0.0
+    for tree in behavior.forest.trees
+        leaf = apply_tree(tree, behavior.X)::MvNormLeaf
+        normal  = leaf.m
+
+        p = pdf(normal, behavior.A)
+
+        if total_probability == 0.0
+            total_probability = p
+            logl = logpdf(normal, behavior.A)
+        elseif p < total_probability
+            # NOTE: log(a + b) = log a + log(1 + b/a)
+            logl += log1p(p/total_probability)
+            total_probability += p
+        else
+            logl = logpdf(normal, behavior.A) + log1p(total_probability/p)
+            total_probability += p
+        end
+    end
+
+    logl
+end
 function calc_action_loglikelihood(
     basics::FeatureExtractBasicsPdSet,
     behavior::DynamicForestBehavior,
@@ -77,17 +107,7 @@ function calc_action_loglikelihood(
     frameind = validfind2frameind(basics.pdset, validfind)
     Features.observe!(behavior.X, basics, carind, frameind, behavior.indicators)
 
-    behavior.A[1] = action_lat
-    behavior.A[2] = action_lon
-
-    ntrees = length(behavior.forest.trees)
-    logl = -ntrees*log(ntrees) # term for the probability of selecting a given mixture component (uniform)
-    for tree_index in 1 : ntrees
-        leaf = apply_tree(behavior.forest.trees[tree_index], behavior.X)::MvNormLeaf
-        normal  = leaf.m
-        logl += logpdf(normal, behavior.A)
-    end
-    logl
+    _calc_action_loglikelihood(behavior, action_lat, action_lon)
 end
 function calc_action_loglikelihood(
     behavior::DynamicForestBehavior,
@@ -95,24 +115,10 @@ function calc_action_loglikelihood(
     frameind::Integer,
     )
 
-    # TODO(tim): make this more memory efficient by preallocating
+    action_lat = features[frameind, symbol(FUTUREDESIREDANGLE_250MS)]::Float64
+    action_lon = features[frameind, symbol(FUTUREACCELERATION_250MS)]::Float64
 
-    behavior.A[1] = features[frameind, symbol(FUTUREDESIREDANGLE_250MS)]::Float64
-    behavior.A[2] = features[frameind, symbol(FUTUREACCELERATION_250MS)]::Float64
-
-    for (i,feature) in enumerate(behavior.indicators)
-        v = features[frameind, symbol(feature)]::Float64
-        behavior.X[i] = clamp(v, -FEATURE_EXTREMUM, FEATURE_EXTREMUM)
-    end
-
-    ntrees = length(behavior.forest.trees)
-    logl = -ntrees*log(ntrees) # term for the probability of selecting a given mixture component (uniform)
-    for tree_index in 1 : ntrees
-        leaf = apply_tree(behavior.forest.trees[tree_index], behavior.X)::MvNormLeaf
-        normal  = leaf.m
-        logl += logpdf(normal, behavior.A)
-    end
-    logl
+    _calc_action_loglikelihood(behavior, action_lat, action_lon)
 end
 
 function train(::Type{DynamicForestBehavior}, trainingframes::DataFrame;

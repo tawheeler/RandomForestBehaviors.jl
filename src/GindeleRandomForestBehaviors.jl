@@ -1,4 +1,4 @@
-    module GindeleRandomForestBehaviors
+module GindeleRandomForestBehaviors
 
 using AutomotiveDrivingModels
 
@@ -45,10 +45,10 @@ function _calc_mvnormal(
     basics::FeatureExtractBasicsPdSet,
     behavior::GindeleRandomForestBehavior,
     carind::Int,
-    frameind::Int # TODO(tim): is validfind vs. frameind an issue here?
+    validfind::Int
     )
 
-    Features.observe!(behavior.X, basics, carind, frameind, behavior.indicators)
+    Features.observe!(behavior.X, basics, carind, validfind, behavior.indicators)
     for (i,v) in enumerate(behavior.X)
         behavior.X[i] = clamp(v, -FEATURE_EXTREMUM, FEATURE_EXTREMUM)
     end
@@ -68,7 +68,7 @@ function select_action(
 
     normal = _calc_mvnormal(basics, behavior, carind, validfind)
 
-    _rand!(normal, behavior.A)
+    Distributions._rand!(normal, behavior.A)
     logl = logpdf(normal, behavior.A)
 
     action_lat = behavior.A[1]
