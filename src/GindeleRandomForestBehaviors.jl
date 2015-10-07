@@ -137,7 +137,6 @@ function train(::Type{GindeleRandomForestBehavior}, trainingframes::DataFrame;
     min_samples_leaves::Integer=20,
     min_split_improvement::Float64=0.0,
     partial_sampling::Float64=0.7,
-    feautre_extremem::Float64=1000.0,
 
     args::Dict=Dict{Symbol,Any}()
     )
