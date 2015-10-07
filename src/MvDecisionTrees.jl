@@ -49,6 +49,10 @@ end
 immutable MvNormLeaf <: Leaf
     m::MvNormal
 end
+immutable AutoregressiveMvNormLeaf <: Leaf
+    A::Matrix{Float64} # regression matrix A = UΦᵀ(ΦΦᵀ + γI)⁻¹ where γ is a ridge regularization param, U is column-wise targets, Φ is column-wise features
+    m::MvNormal        # μ = Aϕ, Σ = d⁻¹ tr(Σ^) I  (d is number of predictors)
+end
 
 immutable Node{T<:Any, LeafType<:Leaf}
     featid::Int # id of the feature we use to split
@@ -838,6 +842,7 @@ function build_leaf{T<:FloatingPoint}(
 
     # calc covariance
 
+    Σ = zeros(T, o, o)
     for i = 1 : n
         if assignment[i] == assignment_id
             for a = 1 : o
@@ -869,6 +874,90 @@ function build_leaf{T<:FloatingPoint}(
     end
 
     MvNormLeaf(MvNormal(leaf_mean, Σ))
+end
+function build_leaf{T<:FloatingPoint}(
+    ::Type{AutoregressiveMvNormLeaf},
+    labels::Matrix{T}, # [nobs × ncols]
+    features::Matrix{T}, # [nrows × nfeatures]
+    assignment::Vector{Int},
+    assignment_id::Int,
+    γ::T=convert(T, 0.5), # ridge-regularization parameter - TODO: make this a learning param
+    )
+
+    o, n = size(labels)
+    p = size(features, 2)
+
+    n_for_id = 0
+    for i = 1 : n
+        if assignment[i] == assignment_id
+            n_for_id += 1
+        end
+    end
+
+    U = Array(Float64, o, n_for_id) # column-wise contatenation of target variables
+    Φ = Array(Float64, p, n_for_id) # column-wise contatenation of predictors
+    u_index = 0
+    for i = 1 : n
+        if assignment[i] == assignment_id
+            u_index += 1
+            for j = 1 : o
+                U[j,u_index] = labels[j,i]
+            end
+            for j = 1 : p
+                Φ[j,u_index] = features[i,j] # features : [nrows, nfeatures], Φ: [nfeatures, nrows]
+            end
+        end
+    end
+
+    A = U*Φ'/(Φ*Φ' + diagm(fill(γ, (2))))
+
+    u_index = 0
+    for i = 1 : n
+        if assignment[i] == assignment_id
+            u_index += 1
+            for j = 1 : o
+                U[j,u_index] = labels[j,i]
+            end
+        end
+    end
+
+    ###########################################################3
+    # calc covariance
+
+    Σ = zeros(T, o, o)
+
+    # obtain upper triangle
+    for i = 1 : n
+        if assignment[i] == assignment_id
+            for a = 1 : o
+                l = labels[a,i] - leaf_mean[a]
+                for b = a : o
+                    Σ[a,b] += l*(labels[b,i]-leaf_mean[b])
+                end
+            end
+        end
+    end
+
+    if n_for_id < 2
+        warn("Not enough samples to build a covariance matrix")
+        for i = 1 : o
+            Σ[i,i] = 1.0
+        end
+    else
+        for i = 1 : o*o
+            Σ[i] /= (n_for_id-1)
+        end
+        for i = 1 : o
+            Σ[i,i] += 1e-20
+        end
+        for a = 2:o
+            for b = 1:a-1
+                Σ[a,b] = Σ[b,a]
+            end
+        end
+    end
+
+    AutoregressiveMvNormLeaf(A, MvNormal(Array(T, o), Σ))
 end
 
 function _build_tree{T<:FloatingPoint, U<:Real}(
