@@ -1,4 +1,4 @@
-    module GindeleRandomForestBehaviors
+module GindeleRandomForestBehaviors
 
 using AutomotiveDrivingModels
 
@@ -45,10 +45,10 @@ function _calc_mvnormal(
     basics::FeatureExtractBasicsPdSet,
     behavior::GindeleRandomForestBehavior,
     carind::Int,
-    frameind::Int # TODO(tim): is validfind vs. frameind an issue here?
+    validfind::Int
     )
 
-    Features.observe!(behavior.X, basics, carind, frameind, behavior.indicators)
+    Features.observe!(behavior.X, basics, carind, validfind, behavior.indicators)
     for (i,v) in enumerate(behavior.X)
         behavior.X[i] = clamp(v, -FEATURE_EXTREMUM, FEATURE_EXTREMUM)
     end
@@ -68,7 +68,7 @@ function select_action(
 
     normal = _calc_mvnormal(basics, behavior, carind, validfind)
 
-    _rand!(normal, behavior.A)
+    Distributions._rand!(normal, behavior.A)
     logl = logpdf(normal, behavior.A)
 
     action_lat = behavior.A[1]
@@ -103,8 +103,6 @@ function calc_action_loglikelihood(
     frameind::Integer,
     )
 
-    # TODO(tim): make this more memory efficient by preallocating
-
     behavior.A[1] = features[frameind, symbol(FUTUREDESIREDANGLE_250MS)]::Float64
     behavior.A[2] = features[frameind, symbol(FUTUREACCELERATION_250MS)]::Float64
 
@@ -116,7 +114,6 @@ function calc_action_loglikelihood(
     apply_forest!(behavior.μ, behavior.model_μ, behavior.X)
     apply_forest!(behavior.Σ, behavior.model_Σ, behavior.X)
 
-    # TODO(tim): use preallocated memory
     mvnorm_model = MvNormal(behavior.μ, behavior.Σ)
 
     # can I compute logl without calling logpdf on MvNormal?
@@ -156,21 +153,14 @@ function train(::Type{GindeleRandomForestBehavior}, trainingframes::DataFrame;
             min_split_improvement = v
         elseif k == :partial_sampling
             partial_sampling = v
-        elseif k == :feautre_extremem
-            feautre_extremem = v
         else
             warn("Train GindeleRandomForestBehavior: ignoring $k")
         end
     end
 
     build_tree_params = BuildTreeParameters(
-        nsubfeatures=int(sqrt(length(indicators))),
-        max_depth=max_depth,
-        min_samples_split=min_samples_split,
-        min_samples_leaves=min_samples_leaves,
-        min_split_improvement=min_split_improvement,
-        loss_function=LossFunction_MSE,
-        leaf_type=MvNormLeaf)
+        ntrees, max_depth, min_samples_split, min_samples_leaves,
+        min_split_improvement, LossFunction_MSE, MeanVecLeaf)
 
     nframes = size(trainingframes, 1)
 
@@ -205,19 +195,14 @@ function train(::Type{GindeleRandomForestBehavior}, trainingframes::DataFrame;
 
     μ = build_forest(y, X, ntrees, build_tree_params, partial_sampling)
 
-    # TODO(tim): do I need to deepcopy y instead?
+    mean_vector = Array(Float64, 2)
     for i = 1 : size(y, 1)
-        y[:,i] -= apply_forest(μ, vec(X[i,:])) # subtract the predicted mean
+        y[:,i] -= apply_forest!(mean_vector, μ, vec(X[i,:])) # subtract the predicted mean
     end
 
     build_tree_params = BuildTreeParameters(
-        nsubfeatures=int(sqrt(length(indicators))),
-        max_depth=max_depth,
-        min_samples_split=min_samples_split,
-        min_samples_leaves=min_samples_leaves,
-        min_split_improvement=min_split_improvement,
-        loss_function=LossFunction_LOGL_MEAN_SUBTRACTED,
-        leaf_type=MvNormLeaf)
+        ntrees, max_depth, min_samples_split, min_samples_leaves,
+        min_split_improvement, LossFunction_LOGL_MEAN_SUBTRACTED, CovLeaf)
 
     Σ = build_forest(y, X, ntrees, build_tree_params, partial_sampling)
 
