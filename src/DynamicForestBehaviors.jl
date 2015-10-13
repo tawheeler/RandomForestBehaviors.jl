@@ -302,29 +302,30 @@ function _calc_action_loglikelihood(
     behavior.A[1] = action_lat
     behavior.A[2] = action_lon
 
+    ntrees = length(behavior.forest.trees)
+    log_ntrees = log(ntrees)
+
     total_probability_density = 0.0
     logl = 0.0
     for tree in behavior.forest.trees
         leaf = apply_tree(tree, behavior.X)::MvNormLeaf
         normal  = leaf.m
 
-        p = pdf(normal, behavior.A)
+        p = pdf(normal, behavior.A)/ntrees
 
         if total_probability_density == 0.0
-            total_probability_density = p
-            logl = logpdf(normal, behavior.A)
+            logl = logpdf(normal, behavior.A) - log_ntrees
         elseif p < total_probability_density
             # NOTE: log(a + b) = log a + log(1 + b/a)
-            logl += log1p(p/total_probability_density)
-            total_probability_density += p
+            logl = logl + log1p(p/total_probability_density)
         else
-            logl = logpdf(normal, behavior.A) + log1p(total_probability_density/p)
-            total_probability_density += p
+            # NOTE: log(a + b) = log b + log(1 + a/b)
+            logl = (logpdf(normal, behavior.A) - log_ntrees) + log1p(total_probability_density/p)
         end
+        total_probability_density += p
     end
 
-    ntrees = length(behavior.forest.trees)
-    logl - ntrees * log(ntrees)
+    logl
 end
 function calc_action_loglikelihood(
     basics::FeatureExtractBasicsPdSet,
@@ -407,7 +408,7 @@ function train(::Type{DynamicForestBehavior}, trainingframes::DataFrame;
         min_samples_leaves,
         min_split_improvement,
         n_split_tries,
-        LossFunction_LOGL,
+        LossFunction_MSE,
         MvNormLeaf
         )
 
