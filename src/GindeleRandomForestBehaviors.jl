@@ -134,6 +134,7 @@ function train(::Type{GindeleRandomForestBehavior}, trainingframes::DataFrame;
     min_samples_leaves::Integer=20,
     min_split_improvement::Float64=0.0,
     partial_sampling::Float64=0.7,
+    n_split_tries::Integer=50,
 
     args::Dict=Dict{Symbol,Any}()
     )
@@ -153,6 +154,8 @@ function train(::Type{GindeleRandomForestBehavior}, trainingframes::DataFrame;
             min_split_improvement = v
         elseif k == :partial_sampling
             partial_sampling = v
+        elseif k == :n_split_tries
+            n_split_tries = v
         else
             warn("Train GindeleRandomForestBehavior: ignoring $k")
         end
@@ -160,7 +163,7 @@ function train(::Type{GindeleRandomForestBehavior}, trainingframes::DataFrame;
 
     build_tree_params = BuildTreeParameters(
         ntrees, max_depth, min_samples_split, min_samples_leaves,
-        min_split_improvement, LossFunction_MSE, MeanVecLeaf)
+        min_split_improvement, n_split_tries, LossFunction_MSE, MeanVecLeaf)
 
     nframes = size(trainingframes, 1)
 

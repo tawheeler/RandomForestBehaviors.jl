@@ -68,6 +68,18 @@ function get_id_count(data::TreeData, id::Int)
     end
     id_count
 end
+function get_nth_valid_id(data::TreeData, id::Int, n::Int)
+    id_count = 0
+    for i = 1 : size(data.X, 1)
+        if data.assignment[i] == id
+            id_count += 1
+            if id_count == n
+                return i
+            end
+        end
+    end
+    return 0
+end
 function get_left_right_counts{T,U}(data::TreeData{T,U}, predictor_index::Int, id::Int, threshold::T)
 
     num_left = 0
@@ -871,6 +883,7 @@ type BuildTreeParameters{F<:LossFunction, LeafType<:Any}
     min_samples_split::Int # minimum number of samples requried in a node to split
     min_samples_leaves::Int # minimum number of samples in newly created leaves
     min_split_improvement::Float64 # will only split if loss(split(leaf)) > loss(leaf) + min_split_improvement
+    n_split_tries::Int # number of random splits to try (sampled uniformally from available predictors and data points)
     loss_function::Type{F}
     leaf_type::Type{LeafType} # the type used for the leaf
 end
@@ -980,7 +993,7 @@ function apply_forest!{T<:Any}(Σ::Matrix{T}, forest::Ensemble{CovLeaf}, feature
     Σ
 end
 
-function _split{F<:LossFunction, T<:FloatingPoint, U<:Real}(
+function _split_old{F<:LossFunction, T<:FloatingPoint, U<:Real}(
     data::TreeData{T,U},
     assignment_id::Int,
 
@@ -1029,6 +1042,46 @@ function _split{F<:LossFunction, T<:FloatingPoint, U<:Real}(
 
     best
 end
+function _split{F<:LossFunction, T<:FloatingPoint, U<:Real}(
+    data::TreeData{T,U},
+    assignment_id::Int,
+
+    min_samples_leaves::Int,
+    min_split_improvement::Float64,
+    loss_function::Type{F},
+    n_split_tries::Int,
+    )
+
+    # returns a tuple: (index_of_feature_we_split_over, threshold)
+
+    id_count = get_id_count(data, assignment_id)
+    nrows, nfeatures = size(data.X)
+    id_range = 1:id_count
+    predictor_range = 1:nfeatures
+
+    @assert(id_count > 0)
+    @assert(nfeatures > 0)
+
+    best_id = 0
+    best_threshold = 0.0
+    best_loss = loss(loss_function, data, assignment_id) + min_split_improvement
+
+    for _ in 1 : n_split_tries
+        predictor_id = rand(predictor_range)
+        nth_id = rand(id_range)
+        row_index = get_nth_valid_id(data, assignment_id, nth_id)
+        threshold = data.X[row_index, predictor_id]
+        value, num_left, num_right = loss(loss_function, data, predictor_id, assignment_id, threshold)
+
+        if value > best_loss && num_left ≥ min_samples_leaves && num_right ≥ min_samples_leaves
+            best_loss = value
+            best_id = predictor_id
+            best_threshold = threshold
+        end
+    end
+
+    (best_id, best_threshold)
+end
 
 function _build_tree{T<:FloatingPoint, U<:Real}(
     data::TreeData{T,U},
@@ -1057,7 +1110,8 @@ function _build_tree{T<:FloatingPoint, U<:Real}(
     id, threshold = _split(data, assignment_id,
                         params.min_samples_leaves,
                         params.min_split_improvement,
-                        params.loss_function
+                        params.loss_function,
+                        params.n_split_tries,
                         )
 
     # println("split id:      ", id)

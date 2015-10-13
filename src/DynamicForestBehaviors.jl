@@ -374,6 +374,7 @@ function train(::Type{DynamicForestBehavior}, trainingframes::DataFrame;
     min_samples_split::Integer=100,
     min_samples_leaves::Integer=20,
     min_split_improvement::Float64=0.0,
+    n_split_tries::Integer=50,
     partial_sampling::Float64=0.7,
 
     args::Dict=Dict{Symbol,Any}()
@@ -394,6 +395,8 @@ function train(::Type{DynamicForestBehavior}, trainingframes::DataFrame;
             min_split_improvement = v
         elseif k == :partial_sampling
             partial_sampling = v
+        elseif k == :n_split_tries
+            n_split_tries = v
         else
             warn("Train DynamicForestBehavior: ignoring $k")
         end
@@ -405,6 +408,7 @@ function train(::Type{DynamicForestBehavior}, trainingframes::DataFrame;
         min_samples_split,
         min_samples_leaves,
         min_split_improvement,
+        n_split_tries,
         LossFunction_LOGL,
         MvNormLeaf
         )
