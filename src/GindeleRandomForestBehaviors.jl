@@ -205,7 +205,7 @@ function train(::Type{GindeleRandomForestBehavior}, trainingframes::DataFrame;
 
     build_tree_params = BuildTreeParameters(
         ntrees, max_depth, min_samples_split, min_samples_leaves,
-        min_split_improvement, LossFunction_MSE, CovLeaf)
+        min_split_improvement, n_split_tries, LossFunction_MSE, CovLeaf)
 
     Σ = build_forest(y, X, ntrees, build_tree_params, partial_sampling)
 

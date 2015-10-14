@@ -27,7 +27,8 @@ export
     build_forest,
     build_tree_parameters
 
-import Distributions: MvNormal
+import Distributions: MvNormal, fit_mle
+import StatsBase: cov
 
 if VERSION.minor >= 4
     typealias Range1{Int} Range{Int}
@@ -725,7 +726,7 @@ function build_leaf{T<:FloatingPoint, S<:Real}(::Type{CovLeaf},
     Construct a leaf whose payload is the covariance matrix for all samples within it
     =#
     o = get_num_observations(data)
-    CovLeaf(_calc_covariance_on_residuals!(zeros(T, o, o), data, assignment_id))
+    CovLeaf(_calc_covariance!(zeros(T, o, o), data, assignment_id))
 end
 function build_leaf{T<:FloatingPoint, S<:Real}(::Type{MvNormLeaf},
     data::TreeData{T,S},
@@ -749,7 +750,7 @@ function build_leaf{T<:FloatingPoint, S<:Real}(::Type{MvNormLeaf},
         end
     end
     for j = 1 : o
-        @inbounds leaf_mean[j] /= n_for_id
+        leaf_mean[j] /= n_for_id
     end
 
     # calc covariance
@@ -767,6 +768,7 @@ function build_leaf{T<:FloatingPoint, S<:Real}(::Type{MvNormLeaf},
         end
     end
 
+
     if n_for_id < 2
         warn("MvDecisionTrees.build_leaf{MvNormLeaf}: Not enough samples ($n_for_id) to build a covariance matrix")
         for i = 1 : o
@@ -778,7 +780,7 @@ function build_leaf{T<:FloatingPoint, S<:Real}(::Type{MvNormLeaf},
         end
         _diagonal_shrinkage!(Σ)
         for a = 2:o
-            for b = 1:a-1
+            for b = 1: a-1
                 Σ[a,b] = Σ[b,a]
             end
         end
@@ -1214,34 +1216,43 @@ end
 #####################################
 # helper functions
 
-function _calc_covariance_on_residuals!{T, U}(
+function _calc_covariance!{T, U}(
     Σ::Matrix{T},
     data::TreeData{T,U},
     assignment_id::Int,
     )
 
-    # NOTE(tim): this assumes that the mean has already been subtracted from the data
+    # println(fit_mle(MvNormal, data.Y))
 
     n, o, p = size(data)
+    leaf_mean = zeros(T, o)
 
     n_for_id = 0
     for i = 1 : n
         if data.assignment[i] == assignment_id
-            for a = 1 : o
-                l = data.Y[a,i]
-                for b = a : o
-                    Σ[a,b] += l*data.Y[b,i]
-                end
-            end
             n_for_id += 1
+            for j = 1 : o
+                leaf_mean[j] += data.Y[j,i]
+            end
         end
     end
+    for j = 1 : o
+        leaf_mean[j] /= n_for_id
+    end
 
-    if n_for_id < 2
-        for i = 1 : o
-            Σ[i,i] = 1.0
+    # calc covariance
+
+    Σ = zeros(T, o, o)
+
+    for i = 1 : n
+        if data.assignment[i] == assignment_id
+            for a = 1 : o
+                l = data.Y[a,i] - leaf_mean[a]
+                for b = a : o
+                    Σ[a,b] += l*(data.Y[b,i]-leaf_mean[b])
+                end
+            end
         end
-        return Σ
     end
 
     for i = 1 : o*o
@@ -1250,20 +1261,19 @@ function _calc_covariance_on_residuals!{T, U}(
 
     _diagonal_shrinkage!(Σ)
 
-    Σ[2,1] = Σ[1,2]
-    # NOTE: copying over symmetric part no longer necessary as we do it above
-    # for a = 2:o
-    #     for b = 1:a-1
-    #         Σ[a,b] = Σ[b,a]
-    #     end
-    # end
+    # copy over symmetric part of matrix
+    for a = 2:o
+        for b = 1:a-1
+            Σ[a,b] = Σ[b,a]
+        end
+    end
 
     Σ
 end
 function _diagonal_shrinkage!{T<:Real}(
     Σ::Matrix{T}, # 2×2 matrix with upper diagonal filled in
                   # this method ONLY affect the upper diagonal
-    ε::T = convert(T, 0.001),
+    ε::T = convert(T, 1e-6),
     )
 
     # now we want to use Shrinkage Estimation - https://en.wikipedia.org/wiki/Estimation_of_covariance_matrices#Shrinkage_estimation
@@ -1277,6 +1287,7 @@ function _diagonal_shrinkage!{T<:Real}(
     a, b, d = Σ[1,1], Σ[1,2], Σ[2,2]
 
     γ = 2.0*(1.0-ε) / (2.0 - a - d + sqrt(a*a -2*a*d + 4*b*b + d*d))
+
     if γ < 1.0
         @assert(γ ≥ 0.0)
 
