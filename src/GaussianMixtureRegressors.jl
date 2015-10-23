@@ -13,6 +13,9 @@ export
     calc_action_loglikelihood,
     train
 
+    http://cs229.stanford.edu/section/more_on_gaussians.pdf
+    http://pypr.sourceforge.net/mog.html
+
 type GMRBehavior <: AbstractVehicleBehavior
 
     # pre-computed conditional values

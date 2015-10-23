@@ -11,4 +11,7 @@ include("GindeleRandomForestBehaviors.jl")
 include("DynamicForestBehaviors.jl")
 @reexport using .DynamicForestBehaviors
 
+include("GaussianMixtureRegressors.jl")
+@reexport using .GaussianMixtureRegressors
+
 end # module
