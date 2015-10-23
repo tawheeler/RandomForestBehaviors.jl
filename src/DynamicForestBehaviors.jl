@@ -358,13 +358,6 @@ function calc_action_loglikelihood(
         v = features[frameind, symbol(feature)]::Float64
         behavior.X[i] = clamp(v, -FEATURE_EXTREMUM, FEATURE_EXTREMUM)
     end
-    # i = 0
-    # for sym in names(features)
-    #     if sym != :f_des_angle_250ms && sym != :f_accel_250ms
-    #         v = float(features[frameind, sym])
-    #         behavior.X[i+=1] = v
-    #     end
-    # end
 
     _calc_action_loglikelihood(behavior, action_lat, action_lon)
 end
