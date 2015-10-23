@@ -355,6 +355,11 @@ function calc_action_loglikelihood(
     action_lat = features[frameind, symbol(FUTUREDESIREDANGLE_250MS)]::Float64
     action_lon = features[frameind, symbol(FUTUREACCELERATION_250MS)]::Float64
 
+    for (i,feature) in enumerate(behavior.indicators)
+        v = features[frameind, symbol(feature)]::Float64
+        behavior.X[i] = clamp(v, -FEATURE_EXTREMUM, FEATURE_EXTREMUM)
+    end
+
     _calc_action_loglikelihood(behavior, action_lat, action_lon)
 end
 
