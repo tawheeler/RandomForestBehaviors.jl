@@ -15,9 +15,9 @@ export
     calc_action_loglikelihood,
     train
 
-const DEFAULT_AUTOREGRESSION_CONSTANT = 0.5
-const DEFAULT_NUM_AUTOREGRESSION_PREDICTORS = 3
-const DEFAULT_NUM_PREDICTOR_SAMPLES = 10
+DEFAULT_AUTOREGRESSION_CONSTANT = 0.5
+DEFAULT_NUM_AUTOREGRESSION_PREDICTORS = 3
+DEFAULT_NUM_PREDICTOR_SAMPLES = 10
 
 ################################################################
 
@@ -360,6 +360,9 @@ function train(::Type{DynamicForestBehavior}, trainingframes::DataFrame;
     min_split_improvement::Float64=0.0,
     n_split_tries::Integer=50,
     partial_sampling::Float64=0.7,
+    autogression_coef::Float64=0.1,
+    n_autoregression_predictors=2,
+    n_random_predictor_samples=10,
 
     args::Dict=Dict{Symbol,Any}()
     )
@@ -381,10 +384,20 @@ function train(::Type{DynamicForestBehavior}, trainingframes::DataFrame;
             partial_sampling = v
         elseif k == :n_split_tries
             n_split_tries = v
+        elseif k == :autogression_coef
+            autogression_coef = v
+        elseif k == :n_autoregression_predictors
+            n_autoregression_predictors = v
+        elseif k == :n_random_predictor_samples
+            n_random_predictor_samples = v
         else
             warn("Train DynamicForestBehavior: ignoring $k")
         end
     end
+
+    global DEFAULT_AUTOREGRESSION_CONSTANT = autogression_coef
+    global DEFAULT_NUM_AUTOREGRESSION_PREDICTORS = n_autoregression_predictors
+    global DEFAULT_NUM_PREDICTOR_SAMPLES = n_random_predictor_samples
 
     build_tree_params = BuildTreeParameters(
         int(sqrt(length(indicators))),
@@ -394,7 +407,7 @@ function train(::Type{DynamicForestBehavior}, trainingframes::DataFrame;
         min_split_improvement,
         n_split_tries,
         LossFunction_MSE,
-        MvNormLeaf
+        AutoregressiveMvNormLeaf
         )
 
     nframes = size(trainingframes, 1)
@@ -417,8 +430,11 @@ function train(::Type{DynamicForestBehavior}, trainingframes::DataFrame;
             total += 1
 
             for (col, feature) in enumerate(indicators)
-                val = trainingframes[row, symbol(feature)]
-                X[total, col] = clamp(val, -FEATURE_EXTREMUM, FEATURE_EXTREMUM)
+                v = trainingframes[row, symbol(feature)]
+                if isin(v)
+                    warn("DynamicForestBehaviors.calc_action_loglikelihood: INF v!")
+                end
+                X[total, col] = v
             end
 
             y[1, total] = action_lat
@@ -428,98 +444,8 @@ function train(::Type{DynamicForestBehavior}, trainingframes::DataFrame;
     y = y[:, 1:total]::Matrix{Float64}
     X = X[1:total, :]::Matrix{Float64}
 
-    # TODO(tim): build a forest whose nodes are MvNormals
     ensemble = build_forest(y, X, ntrees, build_tree_params, partial_sampling)
-
-    DynamicForestBehavior(ensemble, convert(Vector{AbstractFeature}, indicators))
-end
-function train_special(::Type{DynamicForestBehavior}, trainingframes::DataFrame;
-    indicators::Vector{AbstractFeature} = [
-                    POSFY, YAW, SPEED, DELTA_SPEED_LIMIT, VELFX, VELFY, SCENEVELFX, TURNRATE,
-                    D_CL, D_ML, D_MR, TIMETOCROSSING_LEFT, TIMETOCROSSING_RIGHT,
-                    N_LANE_L, N_LANE_R, HAS_LANE_L, HAS_LANE_R, ACC, ACCFX, ACCFY,
-                    A_REQ_STAYINLANE,
-                    HAS_FRONT, D_X_FRONT, D_Y_FRONT, V_X_FRONT, V_Y_FRONT, TTC_X_FRONT,
-                    A_REQ_FRONT, TIMEGAP_X_FRONT,
-                 ],
-
-    ntrees::Integer=10,
-    max_depth::Integer=5,
-    min_samples_split::Integer=100,
-    min_samples_leaves::Integer=20,
-    min_split_improvement::Float64=0.0,
-    n_split_tries::Integer=50,
-    partial_sampling::Float64=0.7,
-
-    args::Dict=Dict{Symbol,Any}()
-    )
-
-    for (k,v) in args
-        if k == :indicators
-            indicators = v
-        elseif k == :ntrees
-            ntrees = v
-        elseif k == :max_depth
-            max_depth = v
-        elseif k == :min_samples_split
-            min_samples_split = v
-        elseif k == :min_samples_leaves
-            min_samples_leaves = v
-        elseif k == :min_split_improvement
-            min_split_improvement = v
-        elseif k == :partial_sampling
-            partial_sampling = v
-        elseif k == :n_split_tries
-            n_split_tries = v
-        else
-            warn("Train DynamicForestBehavior: ignoring $k")
-        end
-    end
-
-    build_tree_params = BuildTreeParameters(
-        int(sqrt(length(indicators))),
-        max_depth,
-        min_samples_split,
-        min_samples_leaves,
-        min_split_improvement,
-        n_split_tries,
-        LossFunction_MSE,
-        MvNormLeaf
-        )
-
-    nframes = size(trainingframes, 1)
-
-    df_ncol = ncol(trainingframes)
-    df_names = names(trainingframes)
-
-    X = Array(Float64, nframes, df_ncol-2)
-    y = Array(Float64, 2, nframes)
-
-    total = 0
-    for row = 1 : nframes
-
-        action_lat = trainingframes[row, :f_des_angle_250ms]
-        action_lon = trainingframes[row, :f_accel_250ms]
-
-        @assert( !isinf(action_lat) && !isinf(action_lon) &&
-                 !any(col->isnan(trainingframes[row,col]), 1:df_ncol) )
-
-        col = 0
-        for sym in names(trainingframes)
-            if sym != :f_des_angle_250ms && sym != :f_accel_250ms
-                col += 1
-                X[row, col] = trainingframes[row, sym]
-            end
-        end
-
-        y[1, row] = action_lat
-        y[2, row] = action_lon
-    end
-
-    # TODO(tim): build a forest whose nodes are MvNormals
-    ensemble = build_forest(y, X, ntrees, build_tree_params, partial_sampling)
-
-    DynamicForestBehavior(ensemble, convert(Vector{AbstractFeature}, fill(YAW, df_ncol-2)))
+    DynamicForestBehavior(ensemble, convert(Vector{AbstractFeature}, indicators), n_autoregression_predictors)
 end
 
 end # end module
