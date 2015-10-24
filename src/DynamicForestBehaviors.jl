@@ -238,17 +238,22 @@ module DynamicForestBehaviors
 using AutomotiveDrivingModels
 
 using RandomForestBehaviors.MvDecisionTrees
+using Distributions.MvNormal
 
 import AutomotiveDrivingModels: AbstractVehicleBehavior, select_action, calc_action_loglikelihood, train, observe, train_special
 
 export
     DynamicForestBehavior,
+    AutoregressiveMvNormLeaf,
 
     select_action,
     calc_action_loglikelihood,
     train
 
-const FEATURE_EXTREMUM = 1000.0
+const FEATURE_EXTREMUM = 1000.0 # TODO(tim): remove this
+const DEFAULT_AUTOREGRESSION_CONSTANT = 0.5
+const DEFAULT_NUM_AUTOREGRESSION_PREDICTORS = 3
+const DEFAULT_NUM_PREDICTOR_SAMPLES = 10
 
 type DynamicForestBehavior <: AbstractVehicleBehavior
     forest::Ensemble
@@ -539,6 +544,186 @@ function train_special(::Type{DynamicForestBehavior}, trainingframes::DataFrame;
     ensemble = build_forest(y, X, ntrees, build_tree_params, partial_sampling)
 
     DynamicForestBehavior(ensemble, convert(Vector{AbstractFeature}, fill(YAW, df_ncol-2)))
+end
+
+###########################################
+
+immutable AutoregressiveMvNormLeaf <: MvDecisionTrees.Leaf
+    A::Matrix{Float64} # regression matrix A = UΦᵀ(ΦΦᵀ + γI)⁻¹ where γ is a ridge regularization param, U is column-wise targets, Φ is column-wise features
+    m::MvNormal        # μ = Aϕ must be overwritten on each use
+    predictor_indeces::Vector{Int} # indeces of predictors
+end
+
+function _regress_on_predictor_subset{T<:FloatingPoint, S<:Real}(
+    data::MvDecisionTrees.TreeData{T,S},
+    assignment_id::Int,
+    Γ::Matrix{T}, # ϕ+1 × ϕ+1 diagonal γ matrix (preallocated)
+    U::Matrix{T}, #   o × m
+    Φ::Matrix{T}, # ϕ+1 × m (is overwritten)
+    A::Matrix{T}, #   o × ϕ+1 (is overwritten)
+    predictor_indeces::Vector{Int}, # length ϕ
+    )
+
+    #=
+    Returns the loss when using this predictor set
+    Overwrites Φ
+    =#
+
+    ϕ = length(predictor_indeces) - 1
+    @assert(size(Φ,1) == ϕ+1)
+    @assert(size(Φ,2) == size(U,2))
+    @assert(size(Γ,1) == size(Γ,2) == ϕ+1 )
+
+    u_index = 0
+    for i in 1 : n
+        if data.assignment[i] == assignment_id
+            u_index += 1
+            for (j,k) in enumerate(predictor_indeces)
+                Φ[j,u_index] = data.X[i,k] # features : [nrows, nfeatures], Φ: [nfeatures, nrows]
+            end
+            Φ[ϕ+1,u_index] = 1.0 # constant 1-predictor
+        end
+    end
+
+    # regress
+
+    A[:] = U*Φ'/(Φ*Φ' + Γ)
+
+    # calc residual loss (square deviation)
+
+    loss = 0.0
+    for i in 1 : n
+        if data.assignment[i] == assignment_id
+            for j in 1 : o
+                r = data.Y[j,i]
+                for k in 1 : ϕ+1
+                    r -= A[j,k]*data.X[i,j]
+                end
+                loss += r*r # squared error
+            end
+        end
+    end
+
+    loss
+end
+function MvDecisionTrees.build_leaf{T<:FloatingPoint, S<:Real}(::Type{AutoregressiveMvNormLeaf},
+    data::MvDecisionTrees.TreeData{T,S},
+    assignment_id::Int,
+    γ::T=DEFAULT_AUTOREGRESSION_CONSTANT, # ridge-regularization parameter
+    n_autoregression_predictors::Int = DEFAULT_NUM_AUTOREGRESSION_PREDICTORS,
+    n_random_predictor_samples::Int = DEFAULT_NUM_PREDICTOR_SAMPLES,
+    )
+
+    #=
+    Fit the regression matrix A = UΦᵀ(ΦΦᵀ + γI)⁻¹
+       γ is a ridge regularization param ≥ 0
+         0 → least squares
+         large γ → increased penalty on regression coefficients
+       U is column-wise targets
+       Φ is column-wise features plus a constant 1-feature
+
+    This function picks a set of 'n_autoregression_predictors' predictors used to regress on the targets
+    This is done 'n_random_predictor_samples' times
+    The best in terms of residual error is kept
+    The covariance matrix is static and computed based on the final residual errors
+    =#
+
+    @assert(n_autoregression_predictors ≥ 0)
+    @assert(n_random_predictor_samples > 0)
+
+    n, o, p = size(data)
+    id_count = get_id_count(data, assignment_id)
+
+    ##################################
+    # pull target matrix
+
+    U = Array(T, o, id_count) # column-wise contatenation of target variables
+
+    u_index = 0
+    for i in 1 : n
+        if data.assignment[i] == assignment_id
+            u_index += 1
+            for j in 1 : o
+                U[j,u_index] = data.Y[j,i]
+            end
+        end
+    end
+
+    #################################
+    # pull predictor matrix
+
+    ϕ = min(n_autoregression_predictors, p) # number of real features
+    Φ = Array(T, ϕ+1, id_count) # column-wise contatenation of predictors (also including constant 1-predictor)
+    Γ = diagm(fill(γ, (ϕ+1)))
+    A = Array(T, o, ϕ+1)
+    predictor_indeces = Array(Int, ϕ)
+
+    if ϕ == 0
+        _regress_on_predictor_subset(data, assignment_id, Γ, U, Φ, A, predictor_indeces) # just solve for A
+    else
+        # pick several samples of predictor_indeces
+        best_A = Array(T, o, ϕ+1)
+        best_loss = Inf
+        best_predictor_indeces = Array(Int, ϕ)
+
+        for i = 1 : n_random_predictor_samples
+            MvDecisionTrees._reservoir_sample!(predictor_indeces, p, ϕ)
+            loss = _regress_on_predictor_subset(data, assignment_id, Γ, U, Φ, A, predictor_indeces)
+            if loss < best_loss
+                best_loss = loss
+                copy!(best_A, A)
+                copy!(best_predictor_indeces, predictor_indeces)
+            end
+        end
+
+        # copy over best results
+        copy!(A, best_A)
+        copy!(predictor_indeces, best_predictor_indeces)
+    end
+
+
+    ###########################################################3
+    # calc covariance
+
+    Σ = zeros(T, o, o)
+
+    # obtain upper triangle
+    for i in 1 : n
+        if data.assignment[i] == assignment_id
+
+            for j in 1 : o
+                r_vec[j] = data.Y[j,i]
+                for k in 1 : p
+                    r_vec[j] -= A[j,k]*data.X[i,j]
+                end
+            end
+
+            for a in 1 : o
+                for b in a : o
+                    Σ[a,b] += r_vec[a] * r_vec[b]
+                end
+            end
+        end
+    end
+
+    if id_count < 2
+        warn("Not enough samples to build a covariance matrix")
+        for i in 1 : o
+            Σ[i,i] = 1.0
+        end
+    else
+        for i in 1 : o*o
+            Σ[i] /= (id_count-1)
+        end
+        MvDecisionTrees._diagonal_shrinkage!(Σ)
+        for a in 2:o
+            for b in 1:a-1
+                Σ[a,b] = Σ[b,a]
+            end
+        end
+    end
+
+    AutoregressiveMvNormLeaf(A, MvNormal(Array(T, o), Σ), predictor_indeces)
 end
 
 end # end module
