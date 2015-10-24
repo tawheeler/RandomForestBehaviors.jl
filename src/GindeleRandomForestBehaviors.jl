@@ -48,11 +48,7 @@ function _calc_mvnormal(
     validfind::Int
     )
 
-    Features.observe!(behavior.X, basics, carind, validfind, behavior.indicators)
-    for (i,v) in enumerate(behavior.X)
-        # TODO(tim): replace na
-        behavior.X[i] = clamp(v, -FEATURE_EXTREMUM, FEATURE_EXTREMUM)
-    end
+    Features.observe!(behavior.X, basics, carind, validfind, behavior.indicators, replace_na=true)
 
     apply_forest!(behavior.μ, behavior.model_μ, behavior.X)
     apply_forest!(behavior.Σ, behavior.model_Σ, behavior.X)
@@ -106,25 +102,18 @@ function calc_action_loglikelihood(
     behavior.A[1] = features[frameind, symbol(FUTUREDESIREDANGLE_250MS)]::Float64
     behavior.A[2] = features[frameind, symbol(FUTUREACCELERATION_250MS)]::Float64
 
-    # TODO(tim): replace na
     for (i,feature) in enumerate(behavior.indicators)
         v = features[frameind, symbol(feature)]::Float64
-        behavior.X[i] = clamp(v, -FEATURE_EXTREMUM, FEATURE_EXTREMUM)
+        if isinf(v)
+            warn("GindeleRandomForestBehavior.calc_action_loglikelihood: INF v!")
+        end
+        behavior.X[i] = v
     end
-    # i = 0
-    # for sym in names(features)
-    #     if sym != :f_des_angle_250ms && sym != :f_accel_250ms
-    #         v = float(features[frameind, sym])
-    #         behavior.X[i+=1] = v
-    #     end
-    # end
 
     apply_forest!(behavior.μ, behavior.model_μ, behavior.X)
     apply_forest!(behavior.Σ, behavior.model_Σ, behavior.X)
 
     mvnorm_model = MvNormal(behavior.μ, behavior.Σ)
-
-    # can I compute logl without calling logpdf on MvNormal?
     logpdf(mvnorm_model, behavior.A)
 end
 
