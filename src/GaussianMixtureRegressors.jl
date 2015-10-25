@@ -251,8 +251,8 @@ function _greedy_select_next_indicator(
     X = Array(Float64, m, 2 + I + 1)
     copy!(X, 1, Y, 1, 2m) # copy the first two columns - the 2 target features
     for (x,y) in enumerate(chosen_indicators)
-        col_start_X = (2+y-1)*m + 1
-        col_start_Y = (2+x-1)*m + 1
+        col_start_X = (2+x-1)*m + 1
+        col_start_Y = (2+y-1)*m + 1
         copy!(X, col_start_X, Y, col_start_Y, m) # copy in the chosen indicator columns
     end
 
@@ -279,7 +279,16 @@ function _greedy_select_next_indicator(
 
 
             # fit a model
-            model = GMM(n_components, X, kind=Σ_type)
+            (model, successful) = try
+                   (GMM(n_components, X, kind=Σ_type), true)
+                catch
+                   (GMM(eye(1)), false)
+                end
+
+            if !successful
+                continue
+            end
+
             behavior = GMRBehavior(model, train_indicators)
 
             # calc logl
