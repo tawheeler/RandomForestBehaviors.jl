@@ -5,13 +5,11 @@ export
     LossFunction_MSE,
     LossFunction_LOGL,
     LossFunction_LOGL_MEAN_SUBTRACTED,
-    LossFunction_AUTOREGRESSIVE,
 
     Leaf,
     MeanVecLeaf,
     CovLeaf,
     MvNormLeaf,
-    AutoregressiveMvNormLeaf,
 
     InternalNode,
     Ensemble,
@@ -30,15 +28,12 @@ export
 import Distributions: MvNormal, fit_mle
 import StatsBase: cov
 
-if VERSION.minor >= 4
+if VERSION.minor ≥ 4
     typealias Range1{Int} Range{Int}
     _int(x) = round(Int, x)
 else
     _int(x) = int(x)
 end
-
-DEFAULT_AUTOREGRESSION_CONSTANT = 0.5
-set_autoregression_constant(γ::Float64) = global DEFAULT_AUTOREGRESSION_CONSTANT = γ
 
 ##############################################################################
 # TreeData
@@ -106,7 +101,6 @@ abstract LossFunction
 type LossFunction_MSE <: LossFunction end # mean squared error loss function
 type LossFunction_LOGL <: LossFunction end # log likelihood loss function
 type LossFunction_LOGL_MEAN_SUBTRACTED <: LossFunction end # log likelihood loss function where labels already has predicted mean subtracted
-type LossFunction_AUTOREGRESSIVE <: LossFunction end
 
 function loss{T<:FloatingPoint, U<:Real}(::Type{LossFunction_MSE},
     data::TreeData{T,U},
@@ -527,151 +521,6 @@ function loss{T<:FloatingPoint, S<:Real}(::Type{LossFunction_LOGL_MEAN_SUBTRACTE
     logl
 end
 
-function loss{T<:FloatingPoint, S<:Real}(::Type{LossFunction_AUTOREGRESSIVE},
-    data::TreeData{T,S},
-    predictor_index::Int,
-    assignment_id::Int,
-    threshold::T, # split point
-    γ::T=DEFAULT_AUTOREGRESSION_CONSTANT,
-    )
-
-    n, o, p = size(data)
-
-    # the sum of the squared residual norms on the resulting leaf: ε = ∑|r|²
-    # A = UΦᵀ(ΦΦᵀ + γI)⁻¹
-    # rₜ = yₜ - A⋅ϕ
-    # The loss is the sum of the losses of each half
-
-
-    # compute U & Φ
-
-    nl, nr = get_left_right_counts(data, predictor_index, assignment_id, threshold)
-    Ul = Array(Float64, o, nl) # column-wise contatenation of target variables
-    Φl = Array(Float64, p, nl) # column-wise contatenation of predictors
-    Ur = Array(Float64, o, nr)
-    Φr = Array(Float64, p, nr)
-
-    id_index_l = 0
-    id_index_r = 0
-    for i = 1 : n
-        if data.assignment[i] == assignment_id
-            if data.X[i,predictor_index] < threshold
-                id_index_l += 1
-                for j = 1 : o
-                    Ul[j,id_index_l] = data.Y[j,i]
-                end
-                for j = 1 : p
-                    Φl[j,id_index_l] = data.X[i,j]
-                end
-            else
-                id_index_r += 1
-                for j = 1 : o
-                    Ur[j,id_index_r] = data.Y[j,i]
-                end
-                for j = 1 : p
-                    Φr[j,id_index_r] = data.X[i,j]
-                end
-            end
-        end
-    end
-
-    # compute A
-    Al = nl > 0 ? Ul*Φl'/(Φl*Φl' + diagm(fill(γ, (p)))) : [γ]
-    Ar = nr > 0 ? Ur*Φr'/(Φr*Φr' + diagm(fill(γ, (p)))) : [γ]
-
-    # compute ε from residual vectors
-    ε = 0.0
-
-    id_index_l = 0
-    id_index_r = 0
-    for i = 1 : n
-        if data.assignment[i] == assignment_id
-
-            sum_of_r_entries_squared = 0.0
-
-            if data.X[i,predictor_index] < threshold
-                for j = 1 : o
-                    r = data.Y[j,i]
-                    for k in 1 : p
-                        r -= Al[j,k]*data.X[i,j]
-                    end
-                    sum_of_r_entries_squared += r*r
-                end
-            else
-                for j = 1 : o
-                    r = data.Y[j,i]
-                    for k in 1 : p
-                        r -= Ar[j,k]*data.X[i,j]
-                    end
-                    sum_of_r_entries_squared += r*r
-                end
-            end
-
-            ε + sqrt(sum_of_r_entries_squared)
-        end
-    end
-
-
-    (ε, nl, nr)
-end
-function loss{T<:FloatingPoint, S<:Real}(::Type{LossFunction_AUTOREGRESSIVE},
-    data::TreeData{T,S},
-    assignment_id::Int,
-    γ::T=DEFAULT_AUTOREGRESSION_CONSTANT,
-    )
-
-    # the sum of the squared residual norms on the resulting leaf: ε = ∑|r|²
-    # A = UΦᵀ(ΦΦᵀ + γI)⁻¹
-    # rₜ = yₜ - A⋅ϕ
-    # Σ = on residual vectors
-
-    n, o, p = size(data)
-    id_count = get_id_count(data, assignment_id)
-
-    # compute U & Φ
-    U = Array(Float64, o, id_count) # column-wise contatenation of target variables
-    Φ = Array(Float64, p, id_count) # column-wise contatenation of predictors
-
-    id_index = 0
-    for i = 1 : n
-        if data.assignment[i] == assignment_id
-            id_index += 1
-            for j = 1 : o
-                U[j,id_index] = data.Y[j,i]
-            end
-            for j = 1 : p
-                Φ[j,id_index] = data.X[i,j]
-            end
-        end
-    end
-
-    # compute A
-    A = U*(Φ')/(Φ*Φ' + diagm(fill(γ, (p))))
-
-    # compute ε from residual vectors
-
-    ε = 0.0
-
-    id_index = 0
-    for i = 1 : n
-        if data.assignment[i] == assignment_id
-
-            sum_of_r_entries_squared = 0.0
-            for j = 1 : o
-                r = data.Y[j,i]
-                for k in 1 : p
-                    r -= A[j,k]*data.X[i,j]
-                end
-                sum_of_r_entries_squared += r*r
-            end
-
-            ε + sqrt(sum_of_r_entries_squared)
-        end
-    end
-
-    ε
-end
-
 ##############################################################################
 # Leaf
 
@@ -684,10 +533,6 @@ immutable CovLeaf{T<:FloatingPoint} <: Leaf
 end
 immutable MvNormLeaf <: Leaf
     m::MvNormal
-end
-immutable AutoregressiveMvNormLeaf <: Leaf
-    A::Matrix{Float64} # regression matrix A = UΦᵀ(ΦΦᵀ + γI)⁻¹ where γ is a ridge regularization param, U is column-wise targets, Φ is column-wise features
-    m::MvNormal        # μ = Aϕ
 end
 
 function build_leaf{T<:FloatingPoint, S<:Real}(::Type{MeanVecLeaf},
@@ -793,77 +638,6 @@ function build_leaf{T<:FloatingPoint, S<:Real}(::Type{MvNormLeaf},
     end
 
     MvNormLeaf(MvNormal(leaf_mean, Σ))
-end
-function build_leaf{T<:FloatingPoint, S<:Real}(::Type{AutoregressiveMvNormLeaf},
-    data::TreeData{T,S},
-    assignment_id::Int,
-    γ::T=DEFAULT_AUTOREGRESSION_CONSTANT, # ridge-regularization parameter - TODO: make this a learning param
-    )
-
-    n, o, p = size(data)
-
-    id_count = get_id_count(data, assignment_id)
-
-    U = Array(Float64, o, id_count) # column-wise contatenation of target variables
-    Φ = Array(Float64, p, id_count) # column-wise contatenation of predictors
-    u_index = 0
-    for i = 1 : n
-        if data.assignment[i] == assignment_id
-            u_index += 1
-            for j = 1 : o
-                U[j,u_index] = data.Y[j,i]
-            end
-            for j = 1 : p
-                Φ[j,u_index] = data.X[i,j] # features : [nrows, nfeatures], Φ: [nfeatures, nrows]
-            end
-        end
-    end
-
-    A = U*Φ'/(Φ*Φ' + diagm(fill(γ, (p))))
-
-    ###########################################################3
-    # calc covariance
-
-    Σ = zeros(T, o, o)
-    r_vec = Array(T, o)
-
-    # obtain upper triangle
-    for i = 1 : n
-        if data.assignment[i] == assignment_id
-
-            for j = 1 : o
-                r_vec[j] = data.Y[j,i]
-                for k in 1 : p
-                    r_vec[j] -= A[j,k]*data.X[i,j]
-                end
-            end
-
-            for a = 1 : o
-                for b = a : o
-                    Σ[a,b] += r_vec[a] * r_vec[b]
-                end
-            end
-        end
-    end
-
-    if id_count < 2
-        warn("Not enough samples to build a covariance matrix")
-        for i = 1 : o
-            Σ[i,i] = 1.0
-        end
-    else
-        for i = 1 : o*o
-            Σ[i] /= (id_count-1)
-        end
-        _diagonal_shrinkage!(Σ)
-        for a = 2:o
-            for b = 1:a-1
-                Σ[a,b] = Σ[b,a]
-            end
-        end
-    end
-
-    AutoregressiveMvNormLeaf(A, MvNormal(Array(T, o), Σ))
 end
 
 ##############################################################################

@@ -13,8 +13,6 @@ export
     calc_action_loglikelihood,
     train
 
-const FEATURE_EXTREMUM = 1000.0
-
 type GindeleRandomForestBehavior <: AbstractVehicleBehavior
     model_μ::Ensemble
     model_Σ::Ensemble
@@ -182,8 +180,11 @@ function train(::Type{GindeleRandomForestBehavior}, trainingframes::DataFrame;
             total += 1
 
             for (col, feature) in enumerate(indicators)
-                val = trainingframes[row, symbol(feature)]
-                X[total, col] = clamp(val, -FEATURE_EXTREMUM, FEATURE_EXTREMUM)
+                v = trainingframes[row, symbol(feature)]
+                if isin(v)
+                    warn("DynamicForestBehaviors.calc_action_loglikelihood: INF v!")
+                end
+                X[total, col] = v
             end
 
             y[1, total] = action_lat
@@ -207,94 +208,6 @@ function train(::Type{GindeleRandomForestBehavior}, trainingframes::DataFrame;
     Σ = build_forest(y, X, ntrees, build_tree_params, partial_sampling)
 
     GindeleRandomForestBehavior(μ, Σ,  convert(Vector{AbstractFeature}, indicators))
-end
-function train_special(::Type{GindeleRandomForestBehavior}, trainingframes::DataFrame;
-    indicators::Vector{AbstractFeature} = [
-                    POSFY, YAW, SPEED, DELTA_SPEED_LIMIT, VELFX, VELFY, SCENEVELFX, TURNRATE,
-                    D_CL, D_ML, D_MR, TIMETOCROSSING_LEFT, TIMETOCROSSING_RIGHT,
-                    N_LANE_L, N_LANE_R, HAS_LANE_L, HAS_LANE_R, ACC, ACCFX, ACCFY,
-                    A_REQ_STAYINLANE,
-                 ],
-
-    ntrees::Integer=10,
-    max_depth::Integer=5,
-    min_samples_split::Integer=100,
-    min_samples_leaves::Integer=20,
-    min_split_improvement::Float64=0.0,
-    partial_sampling::Float64=0.7,
-    n_split_tries::Integer=50,
-
-    args::Dict=Dict{Symbol,Any}()
-    )
-
-    for (k,v) in args
-        if k == :indicators
-            indicators = v
-        elseif k == :ntrees
-            ntrees = v
-        elseif k == :max_depth
-            max_depth = v
-        elseif k == :min_samples_split
-            min_samples_split = v
-        elseif k == :min_samples_leaves
-            min_samples_leaves = v
-        elseif k == :min_split_improvement
-            min_split_improvement = v
-        elseif k == :partial_sampling
-            partial_sampling = v
-        elseif k == :n_split_tries
-            n_split_tries = v
-        else
-            warn("Train GindeleRandomForestBehavior: ignoring $k")
-        end
-    end
-
-    build_tree_params = BuildTreeParameters(
-        ntrees, max_depth, min_samples_split, min_samples_leaves,
-        min_split_improvement, n_split_tries, LossFunction_MSE, MeanVecLeaf)
-
-    nframes = size(trainingframes, 1)
-
-    df_ncol = ncol(trainingframes)
-    df_names = names(trainingframes)
-
-    X = Array(Float64, nframes, df_ncol-2)
-    y = Array(Float64, 2, nframes)
-
-    for row = 1 : nframes
-
-        action_lat = trainingframes[row, :f_des_angle_250ms]
-        action_lon = trainingframes[row, :f_accel_250ms]
-
-        @assert( !isinf(action_lat) && !isinf(action_lon) &&
-                 !any(col->isnan(trainingframes[row,col]), 1:df_ncol) )
-
-        col = 0
-        for sym in names(trainingframes)
-            if sym != :f_des_angle_250ms && sym != :f_accel_250ms
-                col += 1
-                X[row, col] = trainingframes[row, sym]
-            end
-        end
-
-        y[1, row] = action_lat
-        y[2, row] = action_lon
-    end
-
-    μ = build_forest(y, X, ntrees, build_tree_params, partial_sampling)
-
-    mean_vector = Array(Float64, 2)
-    for i = 1 : size(y, 1)
-        y[:,i] -= apply_forest!(mean_vector, μ, vec(X[i,:])) # subtract the predicted mean
-    end
-
-    build_tree_params = BuildTreeParameters(
-        ntrees, max_depth, min_samples_split, min_samples_leaves,
-        min_split_improvement, n_split_tries, LossFunction_MSE, CovLeaf)
-
-    Σ = build_forest(y, X, ntrees, build_tree_params, partial_sampling)
-
-    GindeleRandomForestBehavior(μ, Σ, convert(Vector{AbstractFeature}, fill(YAW, df_ncol-2)))
 end
 
 end # end module
