@@ -81,7 +81,6 @@ type GMRBehavior <: AbstractVehicleBehavior
 
         new(vec_A, vec_b, mixture_Act_given_Obs, mixture_Obs, indicators, x, a)
     end
-
 end
 
 const TOLERANCE_ZERO_PROB_WEIGHT = 1e-16
@@ -332,8 +331,6 @@ function train(::Type{GMRBehavior}, trainingframes::DataFrame;
     Σ_type::Symbol=:full,
     args::Dict=Dict{Symbol,Any}()
     )
-
-    # TODO: replace na
 
     for (k,v) in args
         if k == :indicators
