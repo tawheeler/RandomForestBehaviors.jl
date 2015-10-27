@@ -16,6 +16,8 @@ export
     calc_action_loglikelihood,
     train
 
+const DEFAULT_MIN_EIGENVALUE = 1e-10
+
 type GMRBehavior <: AbstractVehicleBehavior
 
     vec_A::Vector{Matrix{Float64}} # [n_components [2×I]] μ₁₋₂ = μ₁ + Σ₁₂ * Σ₂₂⁻¹ * (x₂ - μ₂) = A*x₂ + b     (I is number of indicators)
@@ -40,8 +42,9 @@ type GMRBehavior <: AbstractVehicleBehavior
         =#
 
         n_targets = 2
+        n_indicators = gmm.d - n_targets
         n_components = gmm.n
-        @assert(length(indicators) == gmm.d - n_targets)
+        @assert(length(indicators) == n_indicators)
         @assert(!in(FUTUREDESIREDANGLE_250MS, indicators))
         @assert(!in(FUTUREACCELERATION_250MS, indicators))
 
@@ -55,22 +58,36 @@ type GMRBehavior <: AbstractVehicleBehavior
             # println(i, "  ", n_components, "  ", size(gmm.μ))
             μ₁ = vec(gmm.μ[i,1:n_targets])
             μ₂ = vec(gmm.μ[i,n_targets+1:end])
-            Σ = inv(gmm.Σ[i]' * gmm.Σ[i]) # NOTE(tim): gmm stores a vector of chol(inv(Σ), :U)
-            chol(Σ)
+
+            Σ = GaussianMixtures.covar(gmm.Σ[i])
+
+            # ensure it is PosDef by a small margin
+            Λ, V = eig(Σ)
+            for (i,λ) in enumerate(Λ)
+                Λ[i] = max(DEFAULT_MIN_EIGENVALUE, λ)
+            end
+            Σ[:] = V*diagm(Λ)/V
+
             Σ₁₁ = Σ[1:n_targets,1:n_targets]
             Σ₁₂ = Σ[1:n_targets,n_targets+1:end]
             Σ₂₂ = Σ[n_targets+1:end,n_targets+1:end]
-            iΣ₂₂ = inv(Σ₂₂)
 
-            A = Σ₁₂ * iΣ₂₂
+            C = eye(n_targets)
 
-            vec_A[i] = A
-            vec_b[i] = vec(μ₁ - A*μ₂)
-            C = Σ₁₁ - Σ₁₂ * iΣ₂₂ * (Σ₁₂')
-            # println(C)
-            # println(eig(C)[1])
+            try
+                iΣ₂₂ = inv(Σ₂₂)
+                A = Σ₁₂ * iΣ₂₂
+
+                vec_A[i] = A
+                vec_b[i] = vec(μ₁ - A*μ₂)
+                C[:] = Σ₁₁ - Σ₁₂ * iΣ₂₂ * (Σ₁₂')
+            catch
+                vec_A[i] = zeros(n_targets, n_indicators)
+                vec_b[i] = zeros(n_indicators)
+            end
+
             vec_G[i] = MvNormal(Array(Float64, n_targets), C) # p(action|obs), mean and weighting must be updated with each observation, cov is pre-computed
-            vec_H[i] = MvNormal(vec(μ₂), Σ₂₂) # p(obs), all pre-computed, should never be edited
+            vec_H[i] = MvNormal(μ₂, Σ₂₂) # p(obs), all pre-computed, should never be edited
         end
 
         mixture_Act_given_Obs = MixtureModel(vec_G, fill(1/n_components, n_components)) # p(action|obs), mean and weighting must be updated with each observation, cov is pre-computed
@@ -81,10 +98,9 @@ type GMRBehavior <: AbstractVehicleBehavior
 
         new(vec_A, vec_b, mixture_Act_given_Obs, mixture_Obs, indicators, x, a)
     end
-
 end
 
-const TOLERANCE_ZERO_PROB_WEIGHT = 1e-16
+const TOLERANCE_ZERO_PROB_WEIGHT = 1e-20
 
 function select_action(
     basics::FeatureExtractBasicsPdSet,
@@ -152,6 +168,9 @@ function select_action(
     (action_lat, action_lon)
 end
 
+DO_IT = true
+dont_do_it() = global DO_IT = false
+
 function _calc_action_loglikelihood(
     behavior::GMRBehavior,
     action_lat::Float64,
@@ -175,22 +194,39 @@ function _calc_action_loglikelihood(
 
         mixture_Act_given_Obs.components[i].μ[:] = behavior.vec_b[i] + behavior.vec_A[i]*behavior.x
     end
-    if abs(total_prior_sum) < TOLERANCE_ZERO_PROB_WEIGHT
+    # if abs(total_prior_sum) < TOLERANCE_ZERO_PROB_WEIGHT
+    if total_prior_sum == 0.0
+
+        println("action: ", behavior.a)
+        println("means:  ")
+        for i in 1 : n_components
+            println("\t", mixture_Act_given_Obs.components[i].μ)
+        end
+        println("obs: ", behavior.x)
+        println("prior:  ", mixture_Act_given_Obs.prior.p)
+        mixture_Act_given_Obs.prior.p[:] ./= total_prior_sum
+        println("prob:   ", pdf(mixture_Act_given_Obs, behavior.a))
+        println("logl:   ", logpdf(mixture_Act_given_Obs, behavior.a))
+        println("  ")
+
         return -Inf
     end
     for i = 1 : n_components
         mixture_Act_given_Obs.prior.p[i] /= total_prior_sum
     end
 
-    # println("action: ", behavior.a)
-    # println("means:  ")
-    # for i in 1 : n_components
-    #     println("\t", mixture_Act_given_Obs.components[i].μ)
+    # if DO_IT
+    #     println("action: ", behavior.a)
+    #     println("means:  ")
+    #     for i in 1 : n_components
+    #         println("\t", mixture_Act_given_Obs.components[i].μ)
+    #     end
+    #     println("prior:  ", mixture_Act_given_Obs.prior.p)
+    #     println("prob:   ", pdf(mixture_Act_given_Obs, behavior.a))
+    #     println("logl:   ", logpdf(mixture_Act_given_Obs, behavior.a))
+    #     println("  ")
+    #     sleep(0.5)
     # end
-    # println("prior:  ", mixture_Act_given_Obs.prior.p)
-    # println("prob:   ", pdf(mixture_Act_given_Obs, behavior.a))
-    # println("logl:   ", logpdf(mixture_Act_given_Obs, behavior.a))
-    # println("  ")
 
     # compute logl
     logpdf(mixture_Act_given_Obs, behavior.a)
@@ -209,11 +245,7 @@ function calc_action_loglikelihood(
     given the VehicleBehaviorGaussian.
     =#
 
-    # TODO(tim): replace na
-    Features.observe!(behavior.x, basics, carind, validfind, behavior.indicators)
-    for i in 1 : length(behavior.x)
-        behavior.x[i] = clamp(behavior.x[i], -100.0, 100.0)
-    end
+    Features.observe!(behavior.x, basics, carind, validfind, behavior.indicators, replace_na=true)
 
     _calc_action_loglikelihood(behavior, action_lat, action_lon)
 end
@@ -226,10 +258,8 @@ function calc_action_loglikelihood(
     action_lat = features[frameind, symbol(FUTUREDESIREDANGLE_250MS)]::Float64
     action_lon = features[frameind, symbol(FUTUREACCELERATION_250MS)]::Float64
 
-    # TODO(tim): replace na
     for (i,feature) in enumerate(behavior.indicators)
-        v = features[frameind, symbol(feature)]::Float64
-        behavior.x[i] = clamp(v, -100.0, 100.0)
+        behavior.x[i] = features[frameind, symbol(feature)]::Float64
     end
 
     _calc_action_loglikelihood(behavior, action_lat, action_lon)
@@ -244,6 +274,7 @@ function _greedy_select_next_indicator(
     Σ_type::Symbol,
     current_model::GMRBehavior,
     current_model_logl::Float64,
+    assign_test::BitVector,
     )
 
     m = size(Y, 1)
@@ -280,7 +311,7 @@ function _greedy_select_next_indicator(
 
             # fit a model
             (model, successful) = try
-                   (GMM(n_components, X, kind=Σ_type), true)
+                   (GMM(n_components, X[!assign_test,:], kind=Σ_type), true)
                 catch
                    (GMM(eye(1)), false)
                 end
@@ -294,7 +325,9 @@ function _greedy_select_next_indicator(
             # calc logl
             logl = 0.0
             for frameind = 1 : m
-                logl += calc_action_loglikelihood(behavior, trainingframes, frameind)
+                if assign_test[frameind]
+                    logl += calc_action_loglikelihood(behavior, trainingframes, frameind)
+                end
             end
             # println("\tlogl: ", logl)
 
@@ -372,16 +405,25 @@ function train(::Type{GMRBehavior}, trainingframes::DataFrame;
     end
 
     prev_logl = -Inf
+    assign_test = falses(nframes)
+    fraction_test = 0.1 # amount test
+    for i = 1 : nframes
+        assign_test[i] = rand() < fraction_test
+    end
+
     chosen_indicators, current_model_logl, current_model = _greedy_select_next_indicator(
-                X, trainingframes, indicators, Int[], n_components, Σ_type, GMRBehavior(), prev_logl)
+                X, trainingframes, indicators, Int[], n_components, Σ_type, GMRBehavior(), prev_logl, assign_test)
     @assert(!isinf(current_model_logl))
 
+    println("logl: ", current_model_logl, "   indicators ", chosen_indicators)
     while prev_logl < current_model_logl && length(chosen_indicators) < max_n_indicators
         prev_logl = current_model_logl
         chosen_indicators, current_model_logl, current_model = _greedy_select_next_indicator(
                                                         X, trainingframes, indicators, chosen_indicators, n_components,
-                                                        Σ_type, current_model, prev_logl)
+                                                        Σ_type, current_model, prev_logl, assign_test)
+        println("logl: ", current_model_logl, "   indicators ", chosen_indicators)
     end
+    println(" ")
 
     # println(current_model.indicators)
 
