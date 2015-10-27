@@ -366,8 +366,6 @@ function train(::Type{GMRBehavior}, trainingframes::DataFrame;
     args::Dict=Dict{Symbol,Any}()
     )
 
-    # TODO: replace na
-
     for (k,v) in args
         if k == :indicators
             indicators = v
