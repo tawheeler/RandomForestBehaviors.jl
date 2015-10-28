@@ -103,7 +103,7 @@ function calc_action_loglikelihood(
     for (i,feature) in enumerate(behavior.indicators)
         v = features[frameind, symbol(feature)]::Float64
         if isinf(v)
-            warn("GindeleRandomForestBehavior.calc_action_loglikelihood: INF v!")
+            error("GindeleRandomForestBehavior.calc_action_loglikelihood: INF v!")
         end
         behavior.X[i] = v
     end
@@ -181,8 +181,8 @@ function train(::Type{GindeleRandomForestBehavior}, trainingframes::DataFrame;
 
             for (col, feature) in enumerate(indicators)
                 v = trainingframes[row, symbol(feature)]
-                if isin(v)
-                    warn("DynamicForestBehaviors.calc_action_loglikelihood: INF v!")
+                if isinf(v)
+                    error("DynamicForestBehaviors.calc_action_loglikelihood: INF v!")
                 end
                 X[total, col] = v
             end

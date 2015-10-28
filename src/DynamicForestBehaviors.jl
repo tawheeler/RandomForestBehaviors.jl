@@ -42,13 +42,14 @@ function _regress_on_predictor_subset{T<:FloatingPoint, S<:Real}(
     Overwrites Φ
     =#
 
-    ϕ = length(predictor_indeces) - 1
+    o, m = size(U)
+    ϕ = length(predictor_indeces)
     @assert(size(Φ,1) == ϕ+1)
-    @assert(size(Φ,2) == size(U,2))
+    @assert(size(Φ,2) == m)
     @assert(size(Γ,1) == size(Γ,2) == ϕ+1 )
 
     u_index = 0
-    for i in 1 : n
+    for i in 1 : m
         if data.assignment[i] == assignment_id
             u_index += 1
             for (j,k) in enumerate(predictor_indeces)
@@ -65,12 +66,12 @@ function _regress_on_predictor_subset{T<:FloatingPoint, S<:Real}(
     # calc residual loss (square deviation)
 
     loss = 0.0
-    for i in 1 : n
+    for i in 1 : m
         if data.assignment[i] == assignment_id
             for j in 1 : o
-                r = data.Y[j,i]
-                for k in 1 : ϕ+1
-                    r -= A[j,k]*data.X[i,j]
+                r = data.Y[j,i] - A[j,ϕ+1]
+                for k in 1 : ϕ
+                    r -= A[j,k]*data.X[i,predictor_indeces[k]]
                 end
                 loss += r*r # squared error
             end
@@ -105,7 +106,7 @@ function MvDecisionTrees.build_leaf{T<:FloatingPoint, S<:Real}(::Type{Autoregres
     @assert(n_random_predictor_samples > 0)
 
     n, o, p = size(data)
-    id_count = get_id_count(data, assignment_id)
+    id_count = MvDecisionTrees.get_id_count(data, assignment_id)
 
     ##################################
     # pull target matrix
@@ -154,20 +155,23 @@ function MvDecisionTrees.build_leaf{T<:FloatingPoint, S<:Real}(::Type{Autoregres
         copy!(predictor_indeces, best_predictor_indeces)
     end
 
+    println(A)
+
 
     ###########################################################3
     # calc covariance
 
     Σ = zeros(T, o, o)
+    r_vec = Array(Float64, o)
 
     # obtain upper triangle
     for i in 1 : n
         if data.assignment[i] == assignment_id
 
             for j in 1 : o
-                r_vec[j] = data.Y[j,i]
-                for k in 1 : p
-                    r_vec[j] -= A[j,k]*data.X[i,j]
+                r_vec[j] = data.Y[j,i] - A[j,ϕ+1]
+                for k in 1 : ϕ
+                    r_vec[j] -= A[j,k]*data.X[i,predictor_indeces[j]]
                 end
             end
 
@@ -185,16 +189,19 @@ function MvDecisionTrees.build_leaf{T<:FloatingPoint, S<:Real}(::Type{Autoregres
             Σ[i,i] = 1.0
         end
     else
+        println(Σ)
         for i in 1 : o*o
             Σ[i] /= (id_count-1)
         end
         MvDecisionTrees._diagonal_shrinkage!(Σ)
+        println(Σ)
         for a in 2:o
             for b in 1:a-1
                 Σ[a,b] = Σ[b,a]
             end
         end
     end
+
 
     AutoregressiveMvNormLeaf(A, MvNormal(Array(T, o), Σ), predictor_indeces)
 end
@@ -334,7 +341,7 @@ function calc_action_loglikelihood(
 
     for (i,feature) in enumerate(behavior.indicators)
         v = features[frameind, symbol(feature)]::Float64
-        if isin(v)
+        if isinf(v)
             warn("DynamicForestBehaviors.calc_action_loglikelihood: INF v!")
         end
         behavior.X[i] = v
@@ -431,7 +438,7 @@ function train(::Type{DynamicForestBehavior}, trainingframes::DataFrame;
 
             for (col, feature) in enumerate(indicators)
                 v = trainingframes[row, symbol(feature)]
-                if isin(v)
+                if isinf(v)
                     warn("DynamicForestBehaviors.calc_action_loglikelihood: INF v!")
                 end
                 X[total, col] = v

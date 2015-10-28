@@ -160,9 +160,6 @@ function select_action(
     (action_lat, action_lon)
 end
 
-DO_IT = true
-dont_do_it() = global DO_IT = false
-
 function _calc_action_loglikelihood(
     behavior::GMRBehavior,
     action_lat::Float64,
@@ -217,19 +214,6 @@ function _calc_action_loglikelihood(
     for i = 1 : n_components
         mixture_Act_given_Obs.prior.p[i] /= total_prior_sum
     end
-
-    # if DO_IT
-    #     println("action: ", behavior.a)
-    #     println("means:  ")
-    #     for i in 1 : n_components
-    #         println("\t", mixture_Act_given_Obs.components[i].μ)
-    #     end
-    #     println("prior:  ", mixture_Act_given_Obs.prior.p)
-    #     println("prob:   ", pdf(mixture_Act_given_Obs, behavior.a))
-    #     println("logl:   ", logpdf(mixture_Act_given_Obs, behavior.a))
-    #     println("  ")
-    #     sleep(0.5)
-    # end
 
     # compute logl
     logl = logpdf(mixture_Act_given_Obs, behavior.a)
