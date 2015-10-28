@@ -42,6 +42,7 @@ function _regress_on_predictor_subset{T<:FloatingPoint, S<:Real}(
     Overwrites Φ
     =#
 
+    n = size(data.X,1)
     o, m = size(U)
     ϕ = length(predictor_indeces)
     @assert(size(Φ,1) == ϕ+1)
@@ -49,7 +50,7 @@ function _regress_on_predictor_subset{T<:FloatingPoint, S<:Real}(
     @assert(size(Γ,1) == size(Γ,2) == ϕ+1 )
 
     u_index = 0
-    for i in 1 : m
+    for i in 1 : n
         if data.assignment[i] == assignment_id
             u_index += 1
             for (j,k) in enumerate(predictor_indeces)
@@ -63,10 +64,24 @@ function _regress_on_predictor_subset{T<:FloatingPoint, S<:Real}(
 
     A[:] = U*Φ'/(Φ*Φ' + Γ)
 
+    # println("inner")
+    # println("\tA:")
+    # for i = 1 : size(A,1)
+    #     println("\t", A[i,:])
+    # end
+    # println("\tU:")
+    # for i = 1 : size(U,1)
+    #     println("\t", U[i,:])
+    # end
+    # println("\tΦ:")
+    # for i = 1 : size(Φ,1)
+    #     println("\t", Φ[i,:])
+    # end
+
     # calc residual loss (square deviation)
 
     loss = 0.0
-    for i in 1 : m
+    for i in 1 : n
         if data.assignment[i] == assignment_id
             for j in 1 : o
                 r = data.Y[j,i] - A[j,ϕ+1]
@@ -107,6 +122,7 @@ function MvDecisionTrees.build_leaf{T<:FloatingPoint, S<:Real}(::Type{Autoregres
 
     n, o, p = size(data)
     id_count = MvDecisionTrees.get_id_count(data, assignment_id)
+    @assert(id_count > 0)
 
     ##################################
     # pull target matrix
@@ -136,27 +152,41 @@ function MvDecisionTrees.build_leaf{T<:FloatingPoint, S<:Real}(::Type{Autoregres
         _regress_on_predictor_subset(data, assignment_id, Γ, U, Φ, A, predictor_indeces) # just solve for A
     else
         # pick several samples of predictor_indeces
-        best_A = Array(T, o, ϕ+1)
+        temp_A = deepcopy(A)
+        temp_predictor_indeces = deepcopy(predictor_indeces)
         best_loss = Inf
-        best_predictor_indeces = Array(Int, ϕ)
+
+        # println("tempA")
+        # println(temp_A)
+        # println("\n")
 
         for i = 1 : n_random_predictor_samples
-            MvDecisionTrees._reservoir_sample!(predictor_indeces, p, ϕ)
-            loss = _regress_on_predictor_subset(data, assignment_id, Γ, U, Φ, A, predictor_indeces)
+            MvDecisionTrees._reservoir_sample!(temp_predictor_indeces, p, ϕ)
+            loss = _regress_on_predictor_subset(data, assignment_id, Γ, U, Φ, temp_A, temp_predictor_indeces)
             if loss < best_loss
                 best_loss = loss
-                copy!(best_A, A)
-                copy!(best_predictor_indeces, predictor_indeces)
+                copy!(A, temp_A)
+                copy!(predictor_indeces, temp_predictor_indeces)
             end
+
+            # println(i, "   ", loss, "   ", best_loss)
+            # println(temp_A)
+            # println("temp pred inds: ", temp_predictor_indeces)
+            # println("pred inds: ", predictor_indeces)
+            # println("")
         end
 
-        # copy over best results
-        copy!(A, best_A)
-        copy!(predictor_indeces, best_predictor_indeces)
+        # in case we found nothing
+        if isinf(best_loss)
+            fill!(A, 0.0)
+            fill!(predictor_indeces, 1)
+        end
     end
 
-    println(A)
-
+    # println("A")
+    # println(A)
+    # println(predictor_indeces)
+    # println("")
 
     ###########################################################3
     # calc covariance
@@ -171,7 +201,7 @@ function MvDecisionTrees.build_leaf{T<:FloatingPoint, S<:Real}(::Type{Autoregres
             for j in 1 : o
                 r_vec[j] = data.Y[j,i] - A[j,ϕ+1]
                 for k in 1 : ϕ
-                    r_vec[j] -= A[j,k]*data.X[i,predictor_indeces[j]]
+                    r_vec[j] -= A[j,k]*data.X[i,predictor_indeces[k]]
                 end
             end
 
@@ -189,12 +219,11 @@ function MvDecisionTrees.build_leaf{T<:FloatingPoint, S<:Real}(::Type{Autoregres
             Σ[i,i] = 1.0
         end
     else
-        println(Σ)
         for i in 1 : o*o
+            @assert(!isnan(Σ[i]))
             Σ[i] /= (id_count-1)
         end
         MvDecisionTrees._diagonal_shrinkage!(Σ)
-        println(Σ)
         for a in 2:o
             for b in 1:a-1
                 Σ[a,b] = Σ[b,a]
@@ -232,7 +261,7 @@ type DynamicForestBehavior <: AbstractVehicleBehavior
 end
 
 function _condition_predictor_mean!(
-    mormal::MvNormal,
+    normal::MvNormal,
     predictor_indeces::Vector{Int},
     A::Matrix{Float64},
     behavior::DynamicForestBehavior,

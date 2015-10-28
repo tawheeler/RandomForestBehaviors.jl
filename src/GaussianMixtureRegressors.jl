@@ -193,11 +193,13 @@ function _calc_action_loglikelihood(
         for i in 1 : n_components
             println("\t", mixture_Act_given_Obs.components[i].μ)
         end
-        println("obs means: ")
-        for i in 1 : n_components
-            for j = 1 : length(mixture_Obs.components[i].μ)
-                @printf("\t[%8.3f] ± [%10.7f  %10.7f]  %10.7f\n", mixture_Obs.components[i].μ[j], mixture_Obs.components[i].Σ.mat[j,1],
-                                                                  mixture_Obs.components[i].Σ.mat[j,2], log(pdf(mixture_Obs.components[i], behavior.x)))
+        if length(mixture_Obs.components[i].μ) == 2
+            println("obs means: ")
+            for i in 1 : n_components
+                for j = 1 : length(mixture_Obs.components[i].μ)
+                    @printf("\t[%8.3f] ± [%10.7f  %10.7f]  %10.7f\n", mixture_Obs.components[i].μ[j], mixture_Obs.components[i].Σ.mat[j,1],
+                                                                      mixture_Obs.components[i].Σ.mat[j,2], log(pdf(mixture_Obs.components[i], behavior.x)))
+                end
             end
         end
         println("obs: ", behavior.x)
