@@ -186,30 +186,30 @@ function _calc_action_loglikelihood(
     # if abs(total_prior_sum) < TOLERANCE_ZERO_PROB_WEIGHT
     if total_prior_sum == 0.0
 
-        println("indicators: ", map(i->symbol(i), behavior.indicators))
-        println("n_components: ", n_components)
-        println("action: ", behavior.a)
-        println("means:  ")
-        for i in 1 : n_components
-            println("\t", mixture_Act_given_Obs.components[i].μ)
-        end
-        if length(mixture_Obs.components[i].μ) == 2
-            println("obs means: ")
-            for i in 1 : n_components
-                for j = 1 : length(mixture_Obs.components[i].μ)
-                    @printf("\t[%8.3f] ± [%10.7f  %10.7f]  %10.7f\n", mixture_Obs.components[i].μ[j], mixture_Obs.components[i].Σ.mat[j,1],
-                                                                      mixture_Obs.components[i].Σ.mat[j,2], log(pdf(mixture_Obs.components[i], behavior.x)))
-                end
-            end
-        end
-        println("obs: ", behavior.x)
-        println("prior:  ", mixture_Act_given_Obs.prior.p)
-        mixture_Act_given_Obs.prior.p[:] ./= total_prior_sum
-        println("prob:   ", pdf(mixture_Act_given_Obs, behavior.a))
-        println("logl:   ", logpdf(mixture_Act_given_Obs, behavior.a))
-        println("  ")
+        # println("indicators: ", map(i->symbol(i), behavior.indicators))
+        # println("n_components: ", n_components)
+        # println("action: ", behavior.a)
+        # println("means:  ")
+        # for i in 1 : n_components
+        #     println("\t", mixture_Act_given_Obs.components[i].μ)
+        # end
+        # if length(mixture_Obs.components[1].μ) == 2
+        #     println("obs means: ")
+        #     for i in 1 : n_components
+        #         for j = 1 : length(mixture_Obs.components[i].μ)
+        #             @printf("\t[%8.3f] ± [%10.7f  %10.7f]  %10.7f\n", mixture_Obs.components[i].μ[j], mixture_Obs.components[i].Σ.mat[j,1],
+        #                                                               mixture_Obs.components[i].Σ.mat[j,2], log(pdf(mixture_Obs.components[i], behavior.x)))
+        #         end
+        #     end
+        # end
+        # println("obs: ", behavior.x)
+        # println("prior:  ", mixture_Act_given_Obs.prior.p)
+        # mixture_Act_given_Obs.prior.p[:] ./= total_prior_sum
+        # println("prob:   ", pdf(mixture_Act_given_Obs, behavior.a))
+        # println("logl:   ", logpdf(mixture_Act_given_Obs, behavior.a))
+        # println("  ")
 
-        sleep(100)
+        # sleep(100)
 
         return -Inf
     end
