@@ -5,7 +5,7 @@ using AutomotiveDrivingModels
 using RandomForestBehaviors.MvDecisionTrees
 using Distributions.MvNormal
 
-import AutomotiveDrivingModels: AbstractVehicleBehavior, select_action, calc_action_loglikelihood, train, observe, train_special
+import AutomotiveDrivingModels: AbstractVehicleBehavior, select_action, calc_action_loglikelihood, train, observe
 
 export
     DynamicForestBehavior,
@@ -27,7 +27,7 @@ immutable AutoregressiveMvNormLeaf <: MvDecisionTrees.Leaf
     predictor_indeces::Vector{Int} # indeces of predictors
 end
 
-function _regress_on_predictor_subset{T<:FloatingPoint, S<:Real}(
+function _regress_on_predictor_subset{T<:AbstractFloat, S<:Real}(
     data::MvDecisionTrees.TreeData{T,S},
     assignment_id::Int,
     Γ::Matrix{T}, # ϕ+1 × ϕ+1 diagonal γ matrix (preallocated)
@@ -95,7 +95,7 @@ function _regress_on_predictor_subset{T<:FloatingPoint, S<:Real}(
 
     loss
 end
-function MvDecisionTrees.build_leaf{T<:FloatingPoint, S<:Real}(::Type{AutoregressiveMvNormLeaf},
+function MvDecisionTrees.build_leaf{T<:AbstractFloat, S<:Real}(::Type{AutoregressiveMvNormLeaf},
     data::MvDecisionTrees.TreeData{T,S},
     assignment_id::Int,
     γ::T=DEFAULT_AUTOREGRESSION_CONSTANT, # ridge-regularization parameter

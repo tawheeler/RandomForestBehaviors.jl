@@ -38,7 +38,7 @@ end
 ##############################################################################
 # TreeData
 
-type TreeData{T<:FloatingPoint, U<:Real}
+type TreeData{T<:AbstractFloat, U<:Real}
     # learning data
     Y::Matrix{T} # [n_observations × n_rows]
     X::Matrix{U} # [n_rows × n_predictors]
@@ -102,7 +102,7 @@ type LossFunction_MSE <: LossFunction end # mean squared error loss function
 type LossFunction_LOGL <: LossFunction end # log likelihood loss function
 type LossFunction_LOGL_MEAN_SUBTRACTED <: LossFunction end # log likelihood loss function where labels already has predicted mean subtracted
 
-function loss{T<:FloatingPoint, U<:Real}(::Type{LossFunction_MSE},
+function loss{T<:AbstractFloat, U<:Real}(::Type{LossFunction_MSE},
     data::TreeData{T,U},
     predictor_index::Int,
     assignment_id::Int,
@@ -139,7 +139,7 @@ function loss{T<:FloatingPoint, U<:Real}(::Type{LossFunction_MSE},
 
     return (-mse, nl, nr)
 end
-function loss{T<:FloatingPoint, U<:Real}(::Type{LossFunction_MSE},
+function loss{T<:AbstractFloat, U<:Real}(::Type{LossFunction_MSE},
     data::TreeData{T,U},
     assignment_id::Int,
     )
@@ -169,7 +169,7 @@ function loss{T<:FloatingPoint, U<:Real}(::Type{LossFunction_MSE},
     return -mse
 end
 
-function loss{T<:FloatingPoint, S<:Real}(::Type{LossFunction_LOGL},
+function loss{T<:AbstractFloat, S<:Real}(::Type{LossFunction_LOGL},
     data::TreeData{T,S},
     predictor_index::Int,
     assignment_id::Int,
@@ -282,7 +282,7 @@ function loss{T<:FloatingPoint, S<:Real}(::Type{LossFunction_LOGL},
 
     return (logl, nl, nr)
 end
-function loss{T<:FloatingPoint, S<:Real}(::Type{LossFunction_LOGL},
+function loss{T<:AbstractFloat, S<:Real}(::Type{LossFunction_LOGL},
     data::TreeData{T,S},
     assignment_id::Int,
     )
@@ -360,7 +360,7 @@ function loss{T<:FloatingPoint, S<:Real}(::Type{LossFunction_LOGL},
     logl
 end
 
-function loss{T<:FloatingPoint, S<:Real}(::Type{LossFunction_LOGL_MEAN_SUBTRACTED},
+function loss{T<:AbstractFloat, S<:Real}(::Type{LossFunction_LOGL_MEAN_SUBTRACTED},
     data::TreeData{T,S},
     predictor_index::Int,
     assignment_id::Int,
@@ -455,7 +455,7 @@ function loss{T<:FloatingPoint, S<:Real}(::Type{LossFunction_LOGL_MEAN_SUBTRACTE
 
     return (logl, nl, nr)
 end
-function loss{T<:FloatingPoint, S<:Real}(::Type{LossFunction_LOGL_MEAN_SUBTRACTED},
+function loss{T<:AbstractFloat, S<:Real}(::Type{LossFunction_LOGL_MEAN_SUBTRACTED},
     data::TreeData{T,S},
     assignment_id::Int,
     )
@@ -525,17 +525,17 @@ end
 # Leaf
 
 abstract Leaf
-immutable MeanVecLeaf{T<:FloatingPoint} <: Leaf
+immutable MeanVecLeaf{T<:AbstractFloat} <: Leaf
     μ::Vector{T}
 end
-immutable CovLeaf{T<:FloatingPoint} <: Leaf
+immutable CovLeaf{T<:AbstractFloat} <: Leaf
     Σ::Matrix{T}
 end
 immutable MvNormLeaf <: Leaf
     m::MvNormal
 end
 
-function build_leaf{T<:FloatingPoint, S<:Real}(::Type{MeanVecLeaf},
+function build_leaf{T<:AbstractFloat, S<:Real}(::Type{MeanVecLeaf},
     data::TreeData{T,S},
     assignment_id::Int,
     )
@@ -562,7 +562,7 @@ function build_leaf{T<:FloatingPoint, S<:Real}(::Type{MeanVecLeaf},
 
     MeanVecLeaf(leaf_mean)
 end
-function build_leaf{T<:FloatingPoint, S<:Real}(::Type{CovLeaf},
+function build_leaf{T<:AbstractFloat, S<:Real}(::Type{CovLeaf},
     data::TreeData{T,S},
     assignment_id::Int,
     )
@@ -573,7 +573,7 @@ function build_leaf{T<:FloatingPoint, S<:Real}(::Type{CovLeaf},
     o = get_num_observations(data)
     CovLeaf(_calc_covariance!(zeros(T, o, o), data, assignment_id))
 end
-function build_leaf{T<:FloatingPoint, S<:Real}(::Type{MvNormLeaf},
+function build_leaf{T<:AbstractFloat, S<:Real}(::Type{MvNormLeaf},
     data::TreeData{T,S},
     assignment_id::Int,
     )
@@ -645,12 +645,12 @@ end
 immutable InternalNode{T<:Any, LeafType<:Leaf}
     featid::Int # id of the feature we use to split
     featval::T # value over which we split
-    left::Union(LeafType, InternalNode)
-    right::Union(LeafType, InternalNode)
+    left::Union{LeafType, InternalNode}
+    right::Union{LeafType, InternalNode}
 end
 
 immutable Ensemble{LeafType<:Leaf}
-    trees::Vector{Union(InternalNode, LeafType)}
+    trees::Vector{Union{InternalNode, LeafType}}
 end
 
 type BuildTreeParameters{F<:LossFunction, LeafType<:Any}
@@ -769,7 +769,7 @@ function apply_forest!{T<:Any}(Σ::Matrix{T}, forest::Ensemble{CovLeaf}, feature
     Σ
 end
 
-function _split_old{F<:LossFunction, T<:FloatingPoint, U<:Real}(
+function _split_old{F<:LossFunction, T<:AbstractFloat, U<:Real}(
     data::TreeData{T,U},
     assignment_id::Int,
 
@@ -818,7 +818,7 @@ function _split_old{F<:LossFunction, T<:FloatingPoint, U<:Real}(
 
     best
 end
-function _split{F<:LossFunction, T<:FloatingPoint, U<:Real}(
+function _split{F<:LossFunction, T<:AbstractFloat, U<:Real}(
     data::TreeData{T,U},
     assignment_id::Int,
 
@@ -859,7 +859,7 @@ function _split{F<:LossFunction, T<:FloatingPoint, U<:Real}(
     (best_id, best_threshold)
 end
 
-function _build_tree{T<:FloatingPoint, U<:Real}(
+function _build_tree{T<:AbstractFloat, U<:Real}(
     data::TreeData{T,U},
     assignment_id::Int,
     params::BuildTreeParameters,
@@ -911,7 +911,7 @@ function _build_tree{T<:FloatingPoint, U<:Real}(
                 _build_tree(data, next_id,       params, _depth+1),
                 _build_tree(data, assignment_id, params, _depth+1))
 end
-function build_tree{T<:FloatingPoint, U<:Real}(labels::Matrix{T}, features::Matrix{U}, params::BuildTreeParameters)
+function build_tree{T<:AbstractFloat, U<:Real}(labels::Matrix{T}, features::Matrix{U}, params::BuildTreeParameters)
 
     o, n = size(labels)
     μ_l = Array(T, o)
@@ -929,7 +929,7 @@ function build_tree{T<:FloatingPoint, U<:Real}(labels::Matrix{T}, features::Matr
     _build_tree(data, 1, params)
 end
 
-function _build_forest_parallel{T<:FloatingPoint, U<:Real}(labels::Matrix{T}, features::Matrix{U}, ntrees::Integer, params::BuildTreeParameters, partialsampling::Float64)
+function _build_forest_parallel{T<:AbstractFloat, U<:Real}(labels::Matrix{T}, features::Matrix{U}, ntrees::Integer, params::BuildTreeParameters, partialsampling::Float64)
     nlabels = _nsamples_labels(labels)
     nsamples = _int(partialsampling * nlabels)
 
@@ -937,9 +937,9 @@ function _build_forest_parallel{T<:FloatingPoint, U<:Real}(labels::Matrix{T}, fe
         inds = rand(1:nlabels, nsamples)
         build_tree(labels[:,inds], features[inds,:], params)
     end
-    Ensemble{params.leaf_type}(convert(Vector{Union(InternalNode, params.leaf_type)}, forest))
+    Ensemble{params.leaf_type}(convert(Vector{Union{InternalNode, params.leaf_type}}, forest))
 end
-function _build_forest_serial{T<:FloatingPoint, U<:Real}(labels::Matrix{T}, features::Matrix{U}, ntrees::Integer, params::BuildTreeParameters, partialsampling::Float64)
+function _build_forest_serial{T<:AbstractFloat, U<:Real}(labels::Matrix{T}, features::Matrix{U}, ntrees::Integer, params::BuildTreeParameters, partialsampling::Float64)
 
     o, nlabels = size(labels)
     μ_l = Array(T, o)
@@ -957,7 +957,7 @@ function _build_forest_serial{T<:FloatingPoint, U<:Real}(labels::Matrix{T}, feat
 
     data = TreeData{T,U}(labels, features, assignment, μ_l, μ_r, Σ_l, Σ_r, subfeature_indeces)
 
-    forest = Array(Union(InternalNode, params.leaf_type), ntrees)
+    forest = Array(Union{InternalNode, params.leaf_type}, ntrees)
     for i = 1 : ntrees
 
         # select nsamples
@@ -977,7 +977,7 @@ function _build_forest_serial{T<:FloatingPoint, U<:Real}(labels::Matrix{T}, feat
 
     Ensemble{params.leaf_type}(forest)
 end
-function build_forest{T<:FloatingPoint, U<:Real}(labels::Matrix{T}, features::Matrix{U}, ntrees::Integer, params::BuildTreeParameters, partialsampling::Float64=0.7)
+function build_forest{T<:AbstractFloat, U<:Real}(labels::Matrix{T}, features::Matrix{U}, ntrees::Integer, params::BuildTreeParameters, partialsampling::Float64=0.7)
 
     @assert(0.0 < partialsampling ≤ 1.0)
     if nprocs() == 1
@@ -1072,7 +1072,7 @@ function _diagonal_shrinkage!{T<:Real}(
 
     Σ
 end
-function _fast_det{T<:FloatingPoint}(M::AbstractMatrix{T})
+function _fast_det{T<:AbstractFloat}(M::AbstractMatrix{T})
     n = size(M,1)
     if n == 1
         M[1]

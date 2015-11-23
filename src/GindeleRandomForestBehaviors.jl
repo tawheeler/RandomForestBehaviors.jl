@@ -4,7 +4,7 @@ using AutomotiveDrivingModels
 
 using RandomForestBehaviors.MvDecisionTrees
 
-import AutomotiveDrivingModels: AbstractVehicleBehavior, select_action, calc_action_loglikelihood, train, train_special, observe
+import AutomotiveDrivingModels: AbstractVehicleBehavior, select_action, calc_action_loglikelihood, train, observe
 
 export
     GindeleRandomForestBehavior,
