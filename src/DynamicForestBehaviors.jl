@@ -10,6 +10,7 @@ import AutomotiveDrivingModels:
     AbstractVehicleBehaviorTrainParams,
     AbstractVehicleBehaviorPreallocatedData,
 
+    preallocate_learning_data,
     select_action,
     calc_action_loglikelihood,
     train,
@@ -18,7 +19,6 @@ import AutomotiveDrivingModels:
 export
     DynamicForestBehavior,
     DF_TrainParams,
-    DF_PreallocatedData,
     AutoregressiveMvNormLeaf,
 
     select_action,
@@ -324,6 +324,14 @@ type DF_PreallocatedData <: AbstractVehicleBehaviorPreallocatedData
     function DF_PreallocatedData(dset::ModelTrainingData, params::DF_TrainParams)
         new()
     end
+end
+
+function preallocate_learning_data(
+    ::Type{DynamicForestBehavior},
+    dset::ModelTrainingData,
+    params::DF_TrainParams)
+    
+    DF_PreallocatedData(dset, params)
 end
 
 function _condition_predictor_mean!(

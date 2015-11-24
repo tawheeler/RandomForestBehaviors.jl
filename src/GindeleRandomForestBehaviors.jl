@@ -9,6 +9,7 @@ import AutomotiveDrivingModels:
     AbstractVehicleBehaviorPreallocatedData,
     AbstractVehicleBehaviorTrainParams,
 
+    preallocate_learning_data,
     select_action,
     calc_action_loglikelihood,
     train,
@@ -16,7 +17,6 @@ import AutomotiveDrivingModels:
 
 export
     GindeleRandomForestBehavior,
-    GRF_PreallocatedData,
     GRF_TrainParams,
 
     select_action,
@@ -88,6 +88,14 @@ type GRF_PreallocatedData <: AbstractVehicleBehaviorPreallocatedData
     function GRF_PreallocatedData(dset::ModelTrainingData, params::GRF_TrainParams)
         new()
     end
+end
+
+function preallocate_learning_data(
+    ::Type{GindeleRandomForestBehavior},
+    dset::ModelTrainingData,
+    params::GRF_TrainParams)
+    
+    GRF_PreallocatedData(dset, params)
 end
 
 function _calc_mvnormal(

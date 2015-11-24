@@ -7,10 +7,20 @@ using AutomotiveDrivingModels
 using GaussianMixtures
 using Distributions
 
-import AutomotiveDrivingModels: AbstractVehicleBehavior, select_action, calc_action_loglikelihood, train, observe
+import AutomotiveDrivingModels:
+    AbstractVehicleBehavior,
+    AbstractVehicleBehaviorPreallocatedData,
+    AbstractVehicleBehaviorTrainParams,
+
+    preallocate_learning_data,
+    select_action,
+    calc_action_loglikelihood,
+    train,
+    observe
 
 export
     GMRBehavior,
+    GMR_TrainParams,
 
     select_action,
     calc_action_loglikelihood,
@@ -90,6 +100,46 @@ type GMRBehavior <: AbstractVehicleBehavior
 
         new(vec_A, vec_b, mixture_Act_given_Obs, mixture_Obs, deepcopy(indicators), x, a)
     end
+end
+
+type GMR_TrainParams <: AbstractVehicleBehaviorTrainParams
+
+    indicators::Vector{AbstractFeature}
+
+    n_components::Int
+    max_n_indicators::Int
+    
+    function GMR_TrainParams(;
+        indicators::Vector{AbstractFeature} = [
+                            POSFY, YAW, SPEED, DELTA_SPEED_LIMIT, VELFX, VELFY, SCENEVELFX, TURNRATE,
+                            D_CL, D_ML, D_MR, TIMETOCROSSING_LEFT, TIMETOCROSSING_RIGHT,
+                            N_LANE_L, N_LANE_R, HAS_LANE_L, HAS_LANE_R, ACC, ACCFX, ACCFY,
+                            A_REQ_STAYINLANE,
+                            HAS_FRONT, D_X_FRONT, D_Y_FRONT, V_X_FRONT, V_Y_FRONT, TTC_X_FRONT,
+                            A_REQ_FRONT, TIMEGAP_X_FRONT,
+                         ],
+
+        n_components::Integer=2,
+        max_n_indicators::Integer=3,
+        )
+
+        new(indicators, n_components, max_n_indicators)
+    end
+end
+type GMR_PreallocatedData <: AbstractVehicleBehaviorPreallocatedData
+    # TODO(tim): put X, y, etc. into here
+
+    function GMR_PreallocatedData(dset::ModelTrainingData, params::GMR_TrainParams)
+        new()
+    end
+end
+
+function preallocate_learning_data(
+    ::Type{GMRBehavior},
+    dset::ModelTrainingData,
+    params::GMR_TrainParams)
+    
+    GMR_PreallocatedData(dset, params)
 end
 
 const TOLERANCE_ZERO_PROB_WEIGHT = 1e-20
@@ -387,6 +437,88 @@ function train(::Type{GMRBehavior}, trainingframes::DataFrame;
     @assert(!in(FUTUREDESIREDANGLE_250MS, indicators))
     @assert(!in(FUTUREACCELERATION_250MS, indicators))
 
+    nframes = size(trainingframes, 1)
+    features = append!([FUTUREDESIREDANGLE_250MS, FUTUREACCELERATION_250MS], indicators)
+
+    # Construct an m×d matrix where
+    #   m - number of data samples
+    #   d - dimension of the feature + target vector
+    X = Array(Float64, nframes, 2 + length(indicators))
+
+    for row = 1 : nframes
+
+        X[row, 1] = trainingframes[row, :f_des_angle_250ms]
+        X[row, 2] = trainingframes[row, :f_accel_250ms]
+
+        for (col, feature) in enumerate(indicators)
+            val = trainingframes[row, symbol(feature)]
+            @assert(!isinf(val))
+            X[row, col+2] = val
+        end
+    end
+
+    prev_logl = -Inf
+    assign_test = falses(nframes)
+    fraction_test = 0.1 # amount test
+    for i = 1 : nframes
+        assign_test[i] = rand() < fraction_test
+    end
+
+    # println("max n indicators: ", max_n_indicators)
+
+    chosen_indicators, current_model_logl, current_model = _greedy_select_next_indicator(
+                X, trainingframes, indicators, Int[], n_components, GMRBehavior(), prev_logl, assign_test)
+    @assert(!isinf(current_model_logl))
+
+    # println("logl: ", current_model_logl, "   indicators ", chosen_indicators)
+    while prev_logl < current_model_logl && length(chosen_indicators) < max_n_indicators
+        prev_logl = current_model_logl
+        chosen_indicators, current_model_logl, current_model = _greedy_select_next_indicator(
+                                                        X, trainingframes, indicators, chosen_indicators, n_components,
+                                                        current_model, prev_logl, assign_test)
+        # println("logl: ", current_model_logl, "   indicators ", chosen_indicators)
+    end
+    # println(" ")
+    # println("sleeping")
+    # sleep(10)
+
+    # println(current_model.indicators)
+
+    # println("final indicators: ", map(i->symbol(i), current_model.indicators))
+    # println(map(i->symbol(i), indicators[chosen_indicators]))
+    # if length(current_model.x) == 2
+    #     current_model.x[:] = [0.5166607680569371,8.25]
+    #     # current_model.x[:] = [ 0.918,    2.650]  # 3.2000716597634202
+    #     println("CHECKING: ", _calc_action_loglikelihood(current_model, -0.00037922436239100674, 0.680074955467191))
+    # end
+
+    # model = GMM(n_components, X, kind=Σ_type)
+    # current_model = GMRBehavior(model, indicators)
+
+    # println("FINAL MODEL")
+    # println(current_model)
+    # println("\n\n")
+
+    current_model
+end
+function train(
+    ::Type{GMRBehavior},
+    training_data::ModelTrainingData,
+    preallocated_data::GMR_PreallocatedData,
+    params::GMR_TrainParams,
+    fold::Int,
+    fold_assignment::FoldAssignment,
+    match_fold::Bool,
+    )
+
+    indicators = params.indicators
+    n_components = params.n_components
+    max_n_indicators = params.max_n_indicators
+
+    @assert(!in(FUTUREDESIREDANGLE_250MS, indicators))
+    @assert(!in(FUTUREACCELERATION_250MS, indicators))
+
+    trainingframes = training_data.dataframe_nona
     nframes = size(trainingframes, 1)
     features = append!([FUTUREDESIREDANGLE_250MS, FUTUREACCELERATION_250MS], indicators)
 
