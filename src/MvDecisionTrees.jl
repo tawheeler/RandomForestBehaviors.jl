@@ -30,7 +30,7 @@ import StatsBase: cov
 
 if VERSION.minor ≥ 4
     typealias Range1{Int} Range{Int}
-    _int(x) = round(Int, x)
+    _int(x) = round(Int, x, RoundNearestTiesUp)
 else
     _int(x) = int(x)
 end
@@ -869,7 +869,7 @@ function _build_tree{T<:AbstractFloat, U<:Real}(
     n = get_num_samples(data)
     n_for_id = 0
     for i = 1 : n
-        n_for_id += int(data.assignment[i] == assignment_id)
+        n_for_id += convert(Int, data.assignment[i] == assignment_id)
     end
 
     # println("size(assignment): ", size(assignment))
