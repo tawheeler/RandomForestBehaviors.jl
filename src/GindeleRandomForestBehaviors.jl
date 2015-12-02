@@ -60,7 +60,7 @@ type GRF_TrainParams <: AbstractVehicleBehaviorTrainParams
 
     min_split_improvement::Float64 # minimum improvement for split to be accepted
     partial_sampling::Float64 # percentage of dataset to sample
-    
+
     function GRF_TrainParams(;
         indicators::Vector{AbstractFeature} = [
                         POSFY, YAW, SPEED, DELTA_SPEED_LIMIT, VELFX, VELFY, SCENEVELFX, TURNRATE,
@@ -93,7 +93,7 @@ end
 function preallocate_learning_data(
     dset::ModelTrainingData,
     params::GRF_TrainParams)
-    
+
     GRF_PreallocatedData(dset, params)
 end
 
@@ -213,7 +213,8 @@ function train(
         action_lon = trainingframes[row, :f_accel_250ms]
 
         if !isinf(action_lat) && !isinf(action_lon) &&
-            !any(feature->isnan(trainingframes[row,symbol(feature)]), indicators)
+            !any(feature->isnan(trainingframes[row,symbol(feature)]), indicators) &&
+            is_in_fold(fold, fold_assignment.frame_assignment[row], match_fold)
 
             total += 1
 

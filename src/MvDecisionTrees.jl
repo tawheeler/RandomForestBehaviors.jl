@@ -716,7 +716,7 @@ function print_tree(tree::InternalNode, depth::Integer=-1, indent::Integer=0)
     print_tree(tree.right, depth, indent + 1)
 end
 
-apply_tree(leaf::Leaf, feature::Array) = leaf
+apply_tree(leaf::Leaf, feature::Vector) = leaf
 function apply_tree(tree::InternalNode, features::Vector)
     if features[tree.featid] < tree.featval
         apply_tree(tree.left, features)
@@ -1062,8 +1062,8 @@ function _diagonal_shrinkage!{T<:Real}(
 
     γ = 2.0*(1.0-ε) / (2.0 - a - d + sqrt(a*a -2*a*d + 4*b*b + d*d))
 
-    if γ < 1.0
-        @assert(γ ≥ 0.0)
+    if 0.0 < γ < 1.0
+        # @assert(γ ≥ 0.0)
 
         Σ[1,1] = γ*a + (1.0-γ)
         Σ[1,2] = γ*b

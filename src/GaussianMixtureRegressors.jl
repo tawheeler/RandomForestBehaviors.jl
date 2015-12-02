@@ -104,12 +104,14 @@ end
 
 type GMR_TrainParams <: AbstractVehicleBehaviorTrainParams
 
+    targets::ModelTargets
     indicators::Vector{AbstractFeature}
 
     n_components::Int
     max_n_indicators::Int
-    
+
     function GMR_TrainParams(;
+        targets::ModelTargets = ModelTargets(FUTUREDESIREDANGLE_250MS, FUTUREACCELERATION_250MS),
         indicators::Vector{AbstractFeature} = [
                             POSFY, YAW, SPEED, DELTA_SPEED_LIMIT, VELFX, VELFY, SCENEVELFX, TURNRATE,
                             D_CL, D_ML, D_MR, TIMETOCROSSING_LEFT, TIMETOCROSSING_RIGHT,
@@ -123,21 +125,28 @@ type GMR_TrainParams <: AbstractVehicleBehaviorTrainParams
         max_n_indicators::Integer=3,
         )
 
-        new(indicators, n_components, max_n_indicators)
+        new(targets, indicators, n_components, max_n_indicators)
     end
 end
 type GMR_PreallocatedData <: AbstractVehicleBehaviorPreallocatedData
     # TODO(tim): put X, y, etc. into here
 
+    X::Matrix{Float64}
+
     function GMR_PreallocatedData(dset::ModelTrainingData, params::GMR_TrainParams)
-        new()
+
+        nframes = size(dset.dataframe, 1)
+        p = length(params.indicators)
+
+        X = Array(Float64, nframes, 2 + p)
+
+        new(X)
     end
 end
-
 function preallocate_learning_data(
     dset::ModelTrainingData,
     params::GMR_TrainParams)
-    
+
     GMR_PreallocatedData(dset, params)
 end
 
@@ -260,7 +269,8 @@ function _calc_action_loglikelihood(
 
         # sleep(100)
 
-        return -Inf
+        return -100.0 # TODO(tim): fix this
+        # return -Inf
     end
     for i = 1 : n_components
         mixture_Act_given_Obs.prior.p[i] /= total_prior_sum
@@ -271,6 +281,8 @@ function _calc_action_loglikelihood(
     # if length(behavior.x) == 2
     #     println("indicators: ", map(i->symbol(i), behavior.indicators), "   ", @sprintf("[%6.3f, %8.3f]", behavior.x[1], behavior.x[2]), "  ", logl)
     # end
+    logl = max(logl, -100.0)
+
     logl
 end
 function calc_action_loglikelihood(
@@ -308,8 +320,7 @@ function calc_action_loglikelihood(
 end
 
 function _greedy_select_next_indicator(
-    Y::Matrix{Float64}, # [m, 2+I]
-    trainingframes::DataFrame,
+    X_orig::Matrix{Float64}, # [m, 2+I], the original dataset
     indicators::Vector{AbstractFeature}, # all indicators
     chosen_indicators::Vector{Int}, # indeces of chosen indicators
     n_components::Integer,
@@ -318,14 +329,14 @@ function _greedy_select_next_indicator(
     assign_test::BitVector,
     )
 
-    m = size(Y, 1)
+    m = size(X_orig, 1)
     I = length(chosen_indicators)
-    X = Array(Float64, m, 2 + I + 1)
-    copy!(X, 1, Y, 1, 2m) # copy the first two columns - the 2 target features
+    X = Array(Float64, m, 2 + I + 1) # TODO(tim): preallocate?
+    copy!(X, 1, X_orig, 1, 2m) # copy the first two columns - the 2 target features
     for (x,y) in enumerate(chosen_indicators)
         col_start_X = (2+x-1)*m + 1
-        col_start_Y = (2+y-1)*m + 1
-        copy!(X, col_start_X, Y, col_start_Y, m) # copy in the chosen indicator columns
+        col_start_orig = (2+y-1)*m + 1
+        copy!(X, col_start_X, X_orig, col_start_orig, m) # copy in the chosen indicator columns
     end
 
     train_indicators = indicators[chosen_indicators]
@@ -337,8 +348,14 @@ function _greedy_select_next_indicator(
 
     # try all possible next features
     col_start_X = (2+I+1-1)*m + 1
+
+    # println("indicators: ", indicators)
+    # println("chosen_indicators: ", chosen_indicators)
+
     for (y,f) in enumerate(indicators)
+
         if !in(y, chosen_indicators)
+
 
             # select indicator
             train_indicators[end] = f
@@ -346,11 +363,18 @@ function _greedy_select_next_indicator(
             # print("trying ", train_indicators)
 
             # copy in the chosen indicator columns
-            col_start_Y = (2+y-1)*m + 1
-            copy!(X, col_start_X, Y, col_start_Y, m)
+            col_start_orig = (2+y-1)*m + 1
+            copy!(X, col_start_X, X_orig, col_start_orig, m)
 
 
             # fit a model
+
+            # println("to_pass:")
+            # to_pass = X[!assign_test,:]
+            # for i in 1 : size(to_pass, 1)
+            #     println(to_pass[i,:])
+            # end
+
             (model, successful) = try
                    (GMM(n_components, X[!assign_test,:], kind=:full), true)
                 catch
@@ -358,6 +382,7 @@ function _greedy_select_next_indicator(
                 end
 
             if !successful
+                # println("unsuccessful")
                 continue
             end
 
@@ -365,9 +390,17 @@ function _greedy_select_next_indicator(
 
             # calc logl
             logl = 0.0
-            for frameind = 1 : m
+            for frameind in 1 : m
                 if assign_test[frameind]
-                    logl += calc_action_loglikelihood(behavior, trainingframes, frameind)
+                    # logl += calc_action_loglikelihood(behavior, trainingframes, frameind)
+
+                    action_lat = X_orig[frameind, 1]
+                    action_lon = X_orig[frameind, 2]
+                    for (i,j) in enumerate(chosen_indicators)
+                        behavior.x[i] = X_orig[frameind, j+2]
+                    end
+
+                    logl += _calc_action_loglikelihood(behavior, action_lat, action_lon)
                 end
             end
             # if length(train_indicators) == 2 && train_indicators[1] == ACC && train_indicators[2] == TIME_CONSECUTIVE_THROTTLE
@@ -418,52 +451,63 @@ function train(
     indicators = params.indicators
     n_components = params.n_components
     max_n_indicators = params.max_n_indicators
+    X = preallocated_data.X
 
-    @assert(!in(FUTUREDESIREDANGLE_250MS, indicators))
-    @assert(!in(FUTUREACCELERATION_250MS, indicators))
+    target_lat = params.targets.lat
+    target_lon = params.targets.lon
+    @assert(!in(target_lat, indicators))
+    @assert(!in(target_lon, indicators))
 
     trainingframes = training_data.dataframe_nona
     nframes = size(trainingframes, 1)
-    features = append!([FUTUREDESIREDANGLE_250MS, FUTUREACCELERATION_250MS], indicators)
+    features = append!([target_lat, target_lon], indicators)
+
+    sym_lat = symbol(target_lat)
+    sym_lon = symbol(target_lon)
 
     # Construct an m×d matrix where
     #   m - number of data samples
     #   d - dimension of the feature + target vector
-    X = Array(Float64, nframes, 2 + length(indicators))
 
+    nframes_actually_used = 0
     for row = 1 : nframes
+        if is_in_fold(fold, fold_assignment.frame_assignment[row], match_fold)
 
-        X[row, 1] = trainingframes[row, :f_des_angle_250ms]
-        X[row, 2] = trainingframes[row, :f_accel_250ms]
+            nframes_actually_used += 1
 
-        for (col, feature) in enumerate(indicators)
-            val = trainingframes[row, symbol(feature)]
-            @assert(!isinf(val))
-            X[row, col+2] = val
+            X[nframes_actually_used, 1] = trainingframes[row, sym_lat]
+            X[nframes_actually_used, 2] = trainingframes[row, sym_lon]
+
+            for (col, feature) in enumerate(indicators)
+                val = trainingframes[row, symbol(feature)]
+                @assert(!isinf(val))
+                X[nframes_actually_used, col+2] = val
+            end
         end
     end
+    X2 = X[1:nframes_actually_used, :]
 
     prev_logl = -Inf
-    assign_test = falses(nframes)
+    assign_test = falses(nframes_actually_used)
     fraction_test = 0.1 # amount test
-    for i = 1 : nframes
+    for i = 1 : nframes_actually_used
         assign_test[i] = rand() < fraction_test
     end
 
     # println("max n indicators: ", max_n_indicators)
 
     chosen_indicators, current_model_logl, current_model = _greedy_select_next_indicator(
-                X, trainingframes, indicators, Int[], n_components, GMRBehavior(), prev_logl, assign_test)
-    @assert(!isinf(current_model_logl))
+                X2, indicators, Int[], n_components, GMRBehavior(), prev_logl, assign_test)
 
     # println("logl: ", current_model_logl, "   indicators ", chosen_indicators)
     while prev_logl < current_model_logl && length(chosen_indicators) < max_n_indicators
         prev_logl = current_model_logl
         chosen_indicators, current_model_logl, current_model = _greedy_select_next_indicator(
-                                                        X, trainingframes, indicators, chosen_indicators, n_components,
+                                                        X2, indicators, chosen_indicators, n_components,
                                                         current_model, prev_logl, assign_test)
         # println("logl: ", current_model_logl, "   indicators ", chosen_indicators)
     end
+    @assert(!isinf(current_model_logl))
     # println(" ")
     # println("sleeping")
     # sleep(10)

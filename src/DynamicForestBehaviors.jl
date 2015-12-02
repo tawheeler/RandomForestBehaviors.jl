@@ -285,7 +285,7 @@ type DF_TrainParams <: AbstractVehicleBehaviorTrainParams
     min_split_improvement::Float64
     partial_sampling::Float64
     autogression_coef::Float64
-    
+
 
     function DF_TrainParams(;
         indicators::Vector{AbstractFeature} = [
@@ -304,7 +304,7 @@ type DF_TrainParams <: AbstractVehicleBehaviorTrainParams
         min_samples_leaves::Integer=20,
         n_random_predictor_samples::Integer=10,
         n_autoregression_predictors::Integer=2,
-        
+
         min_split_improvement::Float64=0.0,
         partial_sampling::Float64=0.7,
         autogression_coef::Float64=0.1,
@@ -318,7 +318,7 @@ type DF_TrainParams <: AbstractVehicleBehaviorTrainParams
     end
 end
 type DF_PreallocatedData <: AbstractVehicleBehaviorPreallocatedData
-    
+
     # TODO: use this
 
     function DF_PreallocatedData(dset::ModelTrainingData, params::DF_TrainParams)
@@ -329,7 +329,7 @@ end
 function preallocate_learning_data(
     dset::ModelTrainingData,
     params::DF_TrainParams)
-    
+
     DF_PreallocatedData(dset, params)
 end
 
@@ -359,13 +359,13 @@ function select_action(
     validfind::Int
     )
 
+    X = behavior.X
+    Features.observe!(X, basics, carind, validfind, behavior.indicators, replace_na=true)
+
     # pick a tree at random
     tree_index = rand(1:length(behavior.forest.trees))
 
     # sample from the MvNorm for said tree
-    X = behavior.X
-    Features.observe!(X, basics, carind, validfind, behavior.indicators, replace_na=true)
-
     leaf = apply_tree(behavior.forest.trees[tree_index], behavior.X)::AutoregressiveMvNormLeaf
     _condition_predictor_mean!(leaf.m, leaf.predictor_indeces, leaf.A, behavior)
 
@@ -479,7 +479,7 @@ function train(
     global DEFAULT_NUM_PREDICTOR_SAMPLES = n_random_predictor_samples
 
     build_tree_params = BuildTreeParameters(
-        int(sqrt(length(indicators))),
+        round(Int, sqrt(length(indicators))),
         max_tree_depth,
         min_samples_split,
         min_samples_leaves,
@@ -506,7 +506,8 @@ function train(
         action_lon = trainingframes[row, :f_accel_250ms]
 
         if !isinf(action_lat) && !isinf(action_lon) &&
-            !any(feature->isnan(trainingframes[row,symbol(feature)]), indicators)
+            !any(feature->isnan(trainingframes[row,symbol(feature)]), indicators) &&
+            is_in_fold(fold, fold_assignment.frame_assignment[row], match_fold)
 
             total += 1
 
