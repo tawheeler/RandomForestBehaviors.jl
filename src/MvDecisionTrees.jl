@@ -769,13 +769,14 @@ function apply_forest!{T<:Any}(Σ::Matrix{T}, forest::Ensemble{CovLeaf}, feature
     Σ
 end
 
-function _split_old{F<:LossFunction, T<:AbstractFloat, U<:Real}(
+function _split{F<:LossFunction, T<:AbstractFloat, U<:Real}(
     data::TreeData{T,U},
     assignment_id::Int,
 
     min_samples_leaves::Int,
     min_split_improvement::Float64,
     loss_function::Type{F},
+    n_thresholds::Int,
     )
 
     # returns a tuple: (index_of_feature_we_split_over, threshold)
@@ -783,9 +784,8 @@ function _split_old{F<:LossFunction, T<:AbstractFloat, U<:Real}(
     nrow, nfeatures = size(data.X)
     best = (0,0)
     best_loss = loss(loss_function, data, assignment_id) + min_split_improvement
-    n_thresholds = min(nrow-1, 10)
+    n_thresholds = min(nrow-1, n_thresholds)
 
-    # TODO: uniformally sample a data point and coordinate instead
     _reservoir_sample!(data.subfeature_indeces, nfeatures)
 
     for i in data.subfeature_indeces
@@ -818,7 +818,7 @@ function _split_old{F<:LossFunction, T<:AbstractFloat, U<:Real}(
 
     best
 end
-function _split{F<:LossFunction, T<:AbstractFloat, U<:Real}(
+function _split_unif_rand{F<:LossFunction, T<:AbstractFloat, U<:Real}(
     data::TreeData{T,U},
     assignment_id::Int,
 

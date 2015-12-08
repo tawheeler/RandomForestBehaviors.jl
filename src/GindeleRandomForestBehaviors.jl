@@ -72,7 +72,7 @@ type GRF_TrainParams <: AbstractVehicleBehaviorTrainParams
         max_tree_depth::Integer=5,
         min_samples_split::Integer=100,
         min_samples_leaves::Integer=20,
-        n_split_tries::Integer=50,
+        n_split_tries::Integer=10,
 
         min_split_improvement::Float64=0.0,
         partial_sampling::Float64=0.7,

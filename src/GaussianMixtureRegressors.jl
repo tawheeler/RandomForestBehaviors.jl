@@ -28,6 +28,19 @@ export
 
 const DEFAULT_MIN_EIGENVALUE = 1e-6
 
+function ensure_posdef!(Σ::Matrix{Float64}, min_eigenvalue::Float64)
+
+    @assert(size(Σ, 1) == size(Σ, 2))
+
+    Λ, V = eig(Σ)
+    for (j,λ) in enumerate(Λ)
+        Λ[j] = max(DEFAULT_MIN_EIGENVALUE, λ)
+    end
+    Σ[:] = V*diagm(Λ)/V
+
+    Σ
+end
+
 type GMRBehavior <: AbstractVehicleBehavior
 
     vec_A::Vector{Matrix{Float64}} # [n_components [2×I]] μ₁₋₂ = μ₁ + Σ₁₂ * Σ₂₂⁻¹ * (x₂ - μ₂) = A*x₂ + b     (I is number of indicators)
@@ -72,11 +85,7 @@ type GMRBehavior <: AbstractVehicleBehavior
             Σ = GaussianMixtures.covar(gmm.Σ[i])
 
             # ensure it is PosDef by a small margin
-            Λ, V = eig(Σ)
-            for (j,λ) in enumerate(Λ)
-                Λ[j] = max(DEFAULT_MIN_EIGENVALUE, λ)
-            end
-            Σ[:] = V*diagm(Λ)/V
+            ensure_posdef!(Σ, DEFAULT_MIN_EIGENVALUE)
 
             Σ₁₁ = Σ[1:n_targets,1:n_targets]
             Σ₁₂ = Σ[1:n_targets,n_targets+1:end]
@@ -89,7 +98,7 @@ type GMRBehavior <: AbstractVehicleBehavior
             C = Σ₁₁ - Σ₁₂ * iΣ₂₂ * (Σ₁₂')
 
             vec_G[i] = MvNormal(Array(Float64, n_targets), C) # p(action|obs), mean and weighting must be updated with each observation, cov is pre-computed
-            vec_H[i] = MvNormal(μ₂, Σ₂₂) # p(obs), all pre-computed, should never be edited
+            vec_H[i] = MvNormal(μ₂, ensure_posdef!(Σ₂₂, DEFAULT_MIN_EIGENVALUE)) # p(obs), all pre-computed, should never be edited
         end
 
         mixture_Act_given_Obs = MixtureModel(vec_G, fill(1/n_components, n_components)) # p(action|obs), mean and weighting must be updated with each observation, cov is pre-computed
