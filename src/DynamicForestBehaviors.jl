@@ -366,7 +366,7 @@ function select_action(
     tree_index = rand(1:length(behavior.forest.trees))
 
     # sample from the MvNorm for said tree
-    leaf = apply_tree(behavior.forest.trees[tree_index], behavior.X)::AutoregressiveMvNormLeaf
+    leaf = apply_tree(behavior.forest.trees[tree_index], X)::AutoregressiveMvNormLeaf
     _condition_predictor_mean!(leaf.m, leaf.predictor_indeces, leaf.A, behavior)
 
     Distributions._rand!(leaf.m, behavior.A)
@@ -451,6 +451,84 @@ function calc_action_loglikelihood(
 
     _calc_action_loglikelihood(behavior, action_lat, action_lon)
 end
+
+# function train(
+#     training_data::ModelTrainingData,
+#     preallocated_data::DF_PreallocatedData,
+#     params::DF_TrainParams,
+#     fold::Int,
+#     fold_assignment::FoldAssignment,
+#     match_fold::Bool,
+#     )
+
+#     indicators = params.indicators
+#     ntrees = params.ntrees
+#     max_tree_depth = params.max_tree_depth
+#     n_split_tries = params.n_split_tries
+#     min_samples_split = params.min_samples_split
+#     min_samples_leaves = params.min_samples_leaves
+#     n_random_predictor_samples = params.n_random_predictor_samples
+#     n_autoregression_predictors = params.n_autoregression_predictors
+#     min_split_improvement = params.min_split_improvement
+#     partial_sampling = params.partial_sampling
+#     autogression_coef = params.autogression_coef
+
+#     # TODO(tim): do this without globals
+#     global DEFAULT_AUTOREGRESSION_CONSTANT = autogression_coef
+#     global DEFAULT_NUM_AUTOREGRESSION_PREDICTORS = n_autoregression_predictors
+#     global DEFAULT_NUM_PREDICTOR_SAMPLES = n_random_predictor_samples
+
+#     build_tree_params = BuildTreeParameters(
+#         round(Int, sqrt(length(indicators))),
+#         max_tree_depth,
+#         min_samples_split,
+#         min_samples_leaves,
+#         min_split_improvement,
+#         n_split_tries,
+#         LossFunction_MSE,
+#         AutoregressiveMvNormLeaf
+#         )
+
+#     trainingframes = training_data.dataframe_nona
+#     nframes = size(trainingframes, 1)
+
+#     X = Array(Float64, nframes, length(indicators))
+#     y = Array(Float64, 2, nframes)
+
+#     df_ncol = ncol(trainingframes)
+#     df_names = names(trainingframes)
+
+#     total = 0
+#     for row = 1 : nframes
+
+#         # TODO(tim): shouldn't use hard-coded symbols
+#         action_lat = trainingframes[row, :f_des_angle_250ms]
+#         action_lon = trainingframes[row, :f_accel_250ms]
+
+#         if !isinf(action_lat) && !isinf(action_lon) &&
+#             !any(feature->isnan(trainingframes[row,symbol(feature)]), indicators) &&
+#             is_in_fold(fold, fold_assignment.frame_assignment[row], match_fold)
+
+#             total += 1
+
+#             for (col, feature) in enumerate(indicators)
+#                 v = trainingframes[row, symbol(feature)]
+#                 if isinf(v)
+#                     warn("DynamicForestBehaviors.calc_action_loglikelihood: INF v!")
+#                 end
+#                 X[total, col] = v
+#             end
+
+#             y[1, total] = action_lat
+#             y[2, total] = action_lon
+#         end
+#     end
+#     y = y[:, 1:total]::Matrix{Float64}
+#     X = X[1:total, :]::Matrix{Float64}
+
+#     ensemble = build_forest(y, X, ntrees, build_tree_params, partial_sampling)
+#     DynamicForestBehavior(ensemble, convert(Vector{AbstractFeature}, indicators), n_autoregression_predictors)
+# end
 
 function train(
     training_data::ModelTrainingData,
