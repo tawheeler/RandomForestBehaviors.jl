@@ -27,6 +27,7 @@ type GindeleRandomForestBehavior <: AbstractVehicleBehavior
     model_μ::Ensemble
     model_Σ::Ensemble
     
+    indicators::Vector{AbstractFeature}
     extractor::FeaturesNew.FeatureSubsetExtractor
     processor::FeaturesNew.DataPreprocessor
 
@@ -49,6 +50,9 @@ type GindeleRandomForestBehavior <: AbstractVehicleBehavior
         retval.μ = Array(Float64, 2)
         retval.Σ = Array(Float64, 2, 2)
         retval.A = Array(Float64, 2)
+
+        retval.indicators = indicators
+        retval.processor = FeaturesNew.ChainedDataProcessor(retval.indicators)
 
         retval
     end
@@ -220,7 +224,7 @@ function select_action(
     validfind::Int
     )
 
-    Features.observe!(behavior.extractor.x, basics, carind, validfind, behavior.extractor.indicators, replace_na=true)
+    Features.observe!(behavior.processor.x, basics, carind, validfind, behavior.indicators, replace_na=true)
     FeaturesNew.process!(behavior.processor)
 
     normal = _calc_mvnormal(behavior)
@@ -273,7 +277,7 @@ function calc_action_loglikelihood(
     behavior.A[1] = action_lat
     behavior.A[2] = action_lon
 
-    Features.observe!(behavior.extractor.x, basics, carind, validfind, behavior.extractor.indicators, replace_na=true)
+    Features.observe!(behavior.processor.x, basics, carind, validfind, behavior.indicators, replace_na=true)
     FeaturesNew.process!(behavior.processor)
 
     normal = _calc_mvnormal(behavior)

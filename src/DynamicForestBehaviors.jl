@@ -219,9 +219,9 @@ end
 
 type DynamicForestBehavior <: AbstractVehicleBehavior
     forest::Ensemble
-    indicators::Union{Vector{AbstractFeature}, Vector{FeaturesNew.AbstractFeature}}
     extractor::FeaturesNew.FeatureSubsetExtractor
     processor::FeaturesNew.DataPreprocessor
+    indicators::Vector{AbstractFeature}
 
     # preallocated memory
     ϕ::Vector{Float64} # [n_predictors+1] (last one is always 1.0)
@@ -237,8 +237,7 @@ type DynamicForestBehavior <: AbstractVehicleBehavior
 
         retval.forest = forest
         retval.indicators = indicators
-        retval.extractor = FeaturesNew.FeatureSubsetExtractor(Array(Float64, length(indicators)), indicators)
-        retval.processor = FeaturesNew.ChainedDataProcessor(retval.extractor)
+        retval.processor = FeaturesNew.ChainedDataProcessor(retval.indicators)
 
         retval.ϕ = Array(Float64, n_predictors+1)
         retval.A = Array(Float64, 2)
@@ -247,7 +246,6 @@ type DynamicForestBehavior <: AbstractVehicleBehavior
     end
     function DynamicForestBehavior(
         forest::Ensemble,
-        indicators::Vector{FeaturesNew.AbstractFeature},
         n_predictors::Int,
         extractor::FeaturesNew.FeatureSubsetExtractor,
         processer::FeaturesNew.ChainedDataProcessor,
@@ -256,11 +254,9 @@ type DynamicForestBehavior <: AbstractVehicleBehavior
         retval = new()
 
         retval.forest = forest
-        retval.indicators = indicators
 
         # copy the processor and ensure that the copied io arrays match up
-
-        retval.extractor = FeaturesNew.FeatureSubsetExtractor(deepcopy(extractor.x), retval.indicators)
+        retval.extractor = FeaturesNew.FeatureSubsetExtractor(deepcopy(extractor.x), extractor.indicators)
         retval.processor = deepcopy(processor, retval.extractor)
 
         retval.ϕ = Array(Float64, n_predictors+1)
@@ -443,7 +439,7 @@ function select_action(
     validfind::Int
     )
 
-    Features.observe!(behavior.extractor.x, basics, carind, validfind, behavior.indicators, replace_na=true)
+    Features.observe!(behavior.processor.x, basics, carind, validfind, behavior.indicators, replace_na=true)
     FeaturesNew.process!(behavior.processor)
 
     # pick a tree at random
@@ -541,7 +537,7 @@ function calc_action_loglikelihood(
     given the VehicleBehaviorGaussian.
     =#
 
-    Features.observe!(behavior.extractor.x, basics, carind, validfind, behavior.indicators, replace_na=true)
+    Features.observe!(behavior.processor.x, basics, carind, validfind, behavior.indicators, replace_na=true)
     FeaturesNew.process!(behavior.processor)
 
     _calc_action_loglikelihood(behavior, action_lat, action_lon)
@@ -572,22 +568,16 @@ function calc_action_loglikelihood(
     frameind::Integer,
     )
 
-    action_lat = features[frameind, symbol(FUTUREDESIREDANGLE_250MS)]::Float64
-    action_lon = features[frameind, symbol(FUTUREACCELERATION_250MS)]::Float64
-
-    if isdefined(behavior, :extractor)
-        frame = frameind
-        FeaturesNew.observe!(behavior.extractor, features, frame)
-        FeaturesNew.process!(behavior.processor)
+    if haskey(features, symbol(FUTUREDESIREDANGLE_250MS))
+        action_lat = features[frameind, symbol(FUTUREDESIREDANGLE_250MS)]::Float64
+        action_lon = features[frameind, symbol(FUTUREACCELERATION_250MS)]::Float64
     else
-        for (i,feature) in enumerate(behavior.indicators)
-            v = features[frameind, symbol(feature)]::Float64
-            if isinf(v)
-                warn("DynamicForestBehaviors.calc_action_loglikelihood: INF v!")
-            end
-            behavior.extractor.x[i] = v
-        end
+        action_lat = features[frameind, symbol(FUTUREDESIREDANGLE)]::Float64
+        action_lon = features[frameind, symbol(FUTUREACCELERATION)]::Float64
     end
+
+    FeaturesNew.observe!(behavior.extractor, features, frameind)
+    FeaturesNew.process!(behavior.processor)
 
     _calc_action_loglikelihood(behavior, action_lat, action_lon)
 end
@@ -732,7 +722,7 @@ function train(
     preprocess = preallocated_data.preprocess
 
     ensemble = build_forest(y, X, ntrees, build_tree_params, partial_sampling)
-    DynamicForestBehavior(ensemble, indicators, n_autoregression_predictors, extractor, preprocess)
+    DynamicForestBehavior(ensemble, n_autoregression_predictors, extractor, preprocess)
 end
 
 end # end module
