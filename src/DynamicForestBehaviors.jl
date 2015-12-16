@@ -217,18 +217,21 @@ end
 
 ################################################################
 
-type DynamicForestBehavior <: AbstractVehicleBehavior
+type DynamicForestBehavior{F} <: AbstractVehicleBehavior
     forest::Ensemble
+
+    targets::ModelTargets{F}
+    indicators::Vector{F}
     extractor::FeaturesNew.FeatureSubsetExtractor
     processor::FeaturesNew.DataPreprocessor
-    indicators::Vector{AbstractFeature}
+    action_clamper::FeaturesNew.DataClamper # contains action vector and clamping range
 
     # preallocated memory
     ϕ::Vector{Float64} # [n_predictors+1] (last one is always 1.0)
-    A::Vector{Float64} # [2]
 
     function DynamicForestBehavior(
         forest::Ensemble,
+        targets::ModelTargets{AbstractFeature},
         indicators::Vector{AbstractFeature},
         n_predictors::Int,
         )
@@ -236,31 +239,37 @@ type DynamicForestBehavior <: AbstractVehicleBehavior
         retval = new()
 
         retval.forest = forest
+        retval.targets = targets
         retval.indicators = indicators
         retval.processor = FeaturesNew.ChainedDataProcessor(retval.indicators)
 
         retval.ϕ = Array(Float64, n_predictors+1)
-        retval.A = Array(Float64, 2)
+        retval.action_clamper = FeaturesNew.DataClamper(Array(Float64, 2), [-Inf, -Inf], [Inf, Inf])
 
         retval
     end
     function DynamicForestBehavior(
         forest::Ensemble,
         n_predictors::Int,
+        targets::ModelTargets{FeaturesNew.AbstractFeature},
         extractor::FeaturesNew.FeatureSubsetExtractor,
-        processer::FeaturesNew.ChainedDataProcessor,
+        processor::FeaturesNew.ChainedDataProcessor,
+        action_clamper::FeaturesNew.DataClamper,
         )
 
         retval = new()
 
         retval.forest = forest
+        retval.targets = targets
 
         # copy the processor and ensure that the copied io arrays match up
         retval.extractor = FeaturesNew.FeatureSubsetExtractor(deepcopy(extractor.x), extractor.indicators)
         retval.processor = deepcopy(processor, retval.extractor)
+        retval.action_clamper = FeaturesNew.DataClamper(Array(Float64, 2),
+                                   deepcopy(action_clamper.f_lo),
+                                   deepcopy(action_clamper.f_hi))
 
         retval.ϕ = Array(Float64, n_predictors+1)
-        retval.A = Array(Float64, 2)
 
         retval
     end
@@ -268,6 +277,7 @@ end
 
 type DF_TrainParams <: AbstractVehicleBehaviorTrainParams
 
+    targets::ModelTargets
     indicators::Union{Vector{AbstractFeature}, Vector{FeaturesNew.AbstractFeature}}
 
     ntrees::Int
@@ -277,15 +287,16 @@ type DF_TrainParams <: AbstractVehicleBehaviorTrainParams
     min_samples_leaves::Int
     n_random_predictor_samples::Int
     n_autoregression_predictors::Int
+    n_PCA_features::Int # 0 means do not use PCA features, otherwise it is the number of PCA features to use
 
     min_split_improvement::Float64
     partial_sampling::Float64
     autogression_coef::Float64
 
-    n_PCA_features::Int # 0 means do not use PCA features, otherwise it is the number of PCA features to use
 
 
     function DF_TrainParams(;
+        targets::ModelTargets = ModelTargets{AbstractFeature}(FUTUREDESIREDANGLE_250MS, FUTUREACCELERATION_250MS),
         indicators::Union{Vector{AbstractFeature}, Vector{FeaturesNew.AbstractFeature}} = [
                         POSFY, YAW, SPEED, DELTA_SPEED_LIMIT, VELFX, VELFY, SCENEVELFX, TURNRATE,
                         D_CL, D_ML, D_MR, TIMETOCROSSING_LEFT, TIMETOCROSSING_RIGHT,
@@ -302,18 +313,21 @@ type DF_TrainParams <: AbstractVehicleBehaviorTrainParams
         min_samples_leaves::Integer=20,
         n_random_predictor_samples::Integer=10,
         n_autoregression_predictors::Integer=2,
-
+        n_PCA_features::Integer=0,
         min_split_improvement::Float64=0.0,
         partial_sampling::Float64=0.7,
         autogression_coef::Float64=0.1,
-
-        n_PCA_features::Int=0,
         )
 
+        if eltype(indicators) <: FeaturesNew.AbstractFeature
+            targets = ModelTargets{FeaturesNew.AbstractFeature}(
+                            FeaturesNew.FUTUREDESIREDANGLE,
+                            FeaturesNew.FUTUREACCELERATION)
+        end
+
         retval = new()
-
+        retval.targets = targets
         retval.indicators = indicators
-
         retval.ntrees = ntrees
         retval.max_tree_depth = max_tree_depth
         retval.n_split_tries = n_split_tries
@@ -321,13 +335,10 @@ type DF_TrainParams <: AbstractVehicleBehaviorTrainParams
         retval.min_samples_leaves = min_samples_leaves
         retval.n_random_predictor_samples = n_random_predictor_samples
         retval.n_autoregression_predictors = n_autoregression_predictors
-
+        retval.n_PCA_features = n_PCA_features
         retval.min_split_improvement = min_split_improvement
         retval.partial_sampling = partial_sampling
         retval.autogression_coef = autogression_coef
-
-        retval.n_PCA_features = n_PCA_features
-
         retval
     end
 end
@@ -339,36 +350,25 @@ type DF_PreallocatedData <: AbstractVehicleBehaviorPreallocatedData
 
     extractor::FeaturesNew.FeatureSubsetExtractor
     preprocess::FeaturesNew.DataPreprocessor
+    action_clamper::FeaturesNew.DataClamper
 
     function DF_PreallocatedData(dset::ModelTrainingData, params::DF_TrainParams)
         new()
     end
     function DF_PreallocatedData(dset::ModelTrainingData2, params::DF_TrainParams)
-        
+
         retval = new()
 
+        targets = params.targets
+        indicators = params.indicators
         trainingframes = dset.dataframe
         nframes = nrow(trainingframes)
-        nindicators = length(params.indicators)
+        nindicators = length(indicators)
 
         X = Array(Float64, nindicators, nframes) # NOTE(tim): initially indicators × nframes, we later transpose it
         Y = Array(Float64, 2, nframes)
 
-        for frame = 1 : nframes
-
-            action_lat = trainingframes[frame, symbol(FeaturesNew.FUTUREDESIREDANGLE)]
-            action_lon = trainingframes[frame, symbol(FeaturesNew.FUTUREACCELERATION)]
-
-            @assert(!isinf(action_lat))
-            @assert(!isinf(action_lon))
-
-            Y[1, total] = action_lat
-            Y[2, total] = action_lon
-
-            for (col, feature) in enumerate(indicators)
-                X[frame, col] = trainingframes[row, symbol(feature)]
-            end
-        end
+        pull_design_and_target_matrices!(X, Y, trainingframes, targets, indicators)
 
         ######################
 
@@ -383,7 +383,7 @@ type DF_PreallocatedData <: AbstractVehicleBehaviorPreallocatedData
             # Add a PCA scaler
             push!(preprocess, X, FeaturesNew.DataLinearTransform, params.n_PCA_features)
 
-            Z = Matrix(Float64, params.n_PCA_features, nframes)
+            Z = Array(Float64, params.n_PCA_features, nframes)
             Z = FeaturesNew.process!(Z, X, preprocess.processors[end])
 
             retval.X = Z # use the smaller one
@@ -391,10 +391,15 @@ type DF_PreallocatedData <: AbstractVehicleBehaviorPreallocatedData
             retval.X = X
         end
 
-        
+
         retval.Y = Y
         retval.extractor = extractor
         retval.preprocess = preprocess
+        retval.action_clamper = FeaturesNew.DataClamper(
+                Array(Float64, 2),
+                vec(minimum(Y, 2)),
+                vec(maximum(Y, 2))
+            )
 
         retval
     end
@@ -420,11 +425,10 @@ function _condition_predictor_mean!(
     behavior::DynamicForestBehavior,
     )
 
-    X = behavior.X
     ϕ = behavior.ϕ
 
     for (i,p) in enumerate(predictor_indeces)
-        ϕ[i] = X[p]
+        ϕ[i] = behavior.processor.z[p]
     end
     ϕ[end] = 1.0
 
@@ -449,10 +453,11 @@ function select_action(
     leaf = apply_tree(behavior.forest.trees[tree_index], behavior.processor.z)::AutoregressiveMvNormLeaf
     _condition_predictor_mean!(leaf.m, leaf.predictor_indeces, leaf.A, behavior)
 
-    Distributions._rand!(leaf.m, behavior.A)
+    Distributions._rand!(leaf.m, behavior.action_clamper.x)
+    FeaturesNew.process!(behavior.action_clamper)
 
-    action_lat = behavior.A[1]
-    action_lon = behavior.A[2]
+    action_lat = behavior.action_clamper.x[1]
+    action_lon = behavior.action_clamper.x[2]
 
     (action_lat, action_lon)
 end
@@ -464,11 +469,10 @@ function select_action(
     frame::Int
     )
 
-    x = behavior.x
-    extractor = behavior.extractor
-
-    FeaturesNew.observe!(extractor, runlog, sn, colset, frame)
+    FeaturesNew.observe!(behavior.extractor, runlog, sn, colset, frame)
     FeaturesNew.process!(behavior.processor)
+
+    println(behavior.processor.z)
 
     # pick a tree at random
     tree_index = rand(1:length(behavior.forest.trees))
@@ -477,10 +481,11 @@ function select_action(
     leaf = apply_tree(behavior.forest.trees[tree_index], behavior.processor.z)::AutoregressiveMvNormLeaf
     _condition_predictor_mean!(leaf.m, leaf.predictor_indeces, leaf.A, behavior)
 
-    Distributions._rand!(leaf.m, behavior.A)
+    Distributions._rand!(leaf.m, behavior.action_clamper.x)
+    FeaturesNew.process!(behavior.action_clamper)
 
-    action_lat = behavior.A[1]
-    action_lon = behavior.A[2]
+    action_lat = behavior.action_clamper.x[1]
+    action_lon = behavior.action_clamper.x[2]
 
     (action_lat, action_lon)
 end
@@ -494,8 +499,8 @@ function _calc_action_loglikelihood(
     # NOTE(tim): this assumes behavior.X has already been filled
 
     processor = behavior.processor
-    behavior.A[1] = action_lat
-    behavior.A[2] = action_lon
+    behavior.action_clamper.x[1] = action_lat
+    behavior.action_clamper.x[2] = action_lon
 
     ntrees = length(behavior.forest.trees)
     log_ntrees = log(ntrees)
@@ -507,16 +512,16 @@ function _calc_action_loglikelihood(
         _condition_predictor_mean!(leaf.m, leaf.predictor_indeces, leaf.A, behavior)
         normal  = leaf.m
 
-        p = pdf(normal, behavior.A)/ntrees
+        p = pdf(normal, behavior.action_clamper.x)/ntrees
 
         if total_probability_density == 0.0
-            logl = logpdf(normal, behavior.A) - log_ntrees
+            logl = logpdf(normal, behavior.action_clamper.x) - log_ntrees
         elseif p < total_probability_density
             # NOTE: log(a + b) = log a + log(1 + b/a)
             logl = logl + log1p(p/total_probability_density)
         else
             # NOTE: log(a + b) = log b + log(1 + a/b)
-            logl = (logpdf(normal, behavior.A) - log_ntrees) + log1p(total_probability_density/p)
+            logl = (logpdf(normal, behavior.action_clamper.x) - log_ntrees) + log1p(total_probability_density/p)
         end
         total_probability_density += p
     end
@@ -568,13 +573,8 @@ function calc_action_loglikelihood(
     frameind::Integer,
     )
 
-    if haskey(features, symbol(FUTUREDESIREDANGLE_250MS))
-        action_lat = features[frameind, symbol(FUTUREDESIREDANGLE_250MS)]::Float64
-        action_lon = features[frameind, symbol(FUTUREACCELERATION_250MS)]::Float64
-    else
-        action_lat = features[frameind, symbol(FUTUREDESIREDANGLE)]::Float64
-        action_lon = features[frameind, symbol(FUTUREACCELERATION)]::Float64
-    end
+    action_lat = features[frameind, symbol(behavior.targets.lat)]::Float64
+    action_lon = features[frameind, symbol(behavior.targets.lon)]::Float64
 
     FeaturesNew.observe!(behavior.extractor, features, frameind)
     FeaturesNew.process!(behavior.processor)
@@ -591,6 +591,7 @@ function train(
     match_fold::Bool,
     )
 
+    targets = params.targets
     indicators = params.indicators
     ntrees = params.ntrees
     max_tree_depth = params.max_tree_depth
@@ -657,7 +658,7 @@ function train(
     X = X[1:total, :]::Matrix{Float64}
 
     ensemble = build_forest(y, X, ntrees, build_tree_params, partial_sampling)
-    DynamicForestBehavior(ensemble, convert(Vector{AbstractFeature}, indicators), n_autoregression_predictors)
+    DynamicForestBehavior{AbstractFeature}(ensemble, targets, convert(Vector{AbstractFeature}, indicators), n_autoregression_predictors)
 end
 function train(
     training_data::ModelTrainingData2,
@@ -668,6 +669,11 @@ function train(
     match_fold::Bool,
     )
 
+    extractor = preallocated_data.extractor
+    preprocess = preallocated_data.preprocess
+    action_clamper = preallocated_data.action_clamper
+
+    targets = params.targets
     ntrees = params.ntrees
     max_tree_depth = params.max_tree_depth
     n_split_tries = params.n_split_tries
@@ -706,23 +712,24 @@ function train(
     y = Array(Float64, 2, nframes)
 
     i = 0
-    for (frame, infold) in enumerate(fold_assignment.frame_assignment)
-        if infold
+    for (frame, fold_a) in enumerate(fold_assignment.frame_assignment)
+        if is_in_fold(fold, fold_a, match_fold)
             i += 1
+
             for j in 1 : size(X_orig, 1)
                 X[i,j] = X_orig[j,frame]
             end
-            y[i,1] = Y_orig[frame,1]
-            y[i,2] = Y_orig[frame,2]
+
+            y[1,i] = Y_orig[1,frame]
+            y[2,i] = Y_orig[2,frame]
         end
     end
     @assert(i == nframes)
 
-    extractor = preallocated_data.extractor
-    preprocess = preallocated_data.preprocess
-
     ensemble = build_forest(y, X, ntrees, build_tree_params, partial_sampling)
-    DynamicForestBehavior(ensemble, n_autoregression_predictors, extractor, preprocess)
+    DynamicForestBehavior{FeaturesNew.AbstractFeature}(
+                    ensemble, n_autoregression_predictors, targets,
+                    extractor, preprocess, action_clamper)
 end
 
 end # end module
