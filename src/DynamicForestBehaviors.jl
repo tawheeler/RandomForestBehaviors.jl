@@ -372,7 +372,7 @@ type DF_PreallocatedData <: AbstractVehicleBehaviorPreallocatedData
 
         ######################
 
-        extractor = FeaturesNew.FeatureSubsetExtractor(Array(Float64, nindicators), indicators)
+        extractor = FeaturesNew.FeatureSubsetExtractor(indicators)
         preprocess = FeaturesNew.ChainedDataProcessor(extractor)
         push!(preprocess, X, FeaturesNew.DataNaReplacer, extractor.indicators)
         FeaturesNew.process!(X, preprocess.processors[end]) # process in place
@@ -472,8 +472,6 @@ function select_action(
     FeaturesNew.observe!(behavior.extractor, runlog, sn, colset, frame)
     FeaturesNew.process!(behavior.processor)
 
-    println(behavior.processor.z)
-
     # pick a tree at random
     tree_index = rand(1:length(behavior.forest.trees))
 
@@ -498,7 +496,6 @@ function _calc_action_loglikelihood(
 
     # NOTE(tim): this assumes behavior.X has already been filled
 
-    processor = behavior.processor
     behavior.action_clamper.x[1] = action_lat
     behavior.action_clamper.x[2] = action_lon
 
@@ -508,7 +505,7 @@ function _calc_action_loglikelihood(
     total_probability_density = 0.0
     logl = 0.0
     for tree in behavior.forest.trees
-        leaf = apply_tree(tree, processor.z)::AutoregressiveMvNormLeaf
+        leaf = apply_tree(tree, behavior.processor.z)::AutoregressiveMvNormLeaf
         _condition_predictor_mean!(leaf.m, leaf.predictor_indeces, leaf.A, behavior)
         normal  = leaf.m
 
@@ -632,9 +629,8 @@ function train(
     total = 0
     for row = 1 : nframes
 
-        # TODO(tim): shouldn't use hard-coded symbols
-        action_lat = trainingframes[row, :f_des_angle_250ms]
-        action_lon = trainingframes[row, :f_accel_250ms]
+        action_lat = trainingframes[row, symbol(targets.lat)]
+        action_lon = trainingframes[row, symbol(targets.lon)]
 
         if !isinf(action_lat) && !isinf(action_lon) &&
             !any(feature->isnan(trainingframes[row,symbol(feature)]), indicators) &&
