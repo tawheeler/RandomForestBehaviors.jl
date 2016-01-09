@@ -324,10 +324,10 @@ type GMR_PreallocatedData <: AbstractVehicleBehaviorPreallocatedData
         ###########################
 
         preprocess_target = FeaturesNew.ChainedDataProcessor(2)
-        push!(preprocess_target, Y, FeaturesNew.DataScaler) # ensure data is standardized before running PCA
-        FeaturesNew.process!(Y, preprocess_target.processors[end]) # process in place
         push!(preprocess_target, Y, FeaturesNew.DataClamper)
         FeaturesNew.process!(Y, preprocess_target.processors[end]) # process in place
+        # push!(preprocess_target, Y, FeaturesNew.DataScaler) # ensure data is standardized before running PCA
+        # FeaturesNew.process!(Y, preprocess_target.processors[end]) # process in place
 
         extractor = FeaturesNew.FeatureSubsetExtractor(Array(Float64, nindicators), indicators)
         preprocess = FeaturesNew.ChainedDataProcessor(extractor)
