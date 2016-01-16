@@ -488,16 +488,18 @@ function select_action(
     (action_lat, action_lon)
 end
 
-function _calc_action_loglikelihood(
-    behavior::DynamicForestBehavior,
-    action_lat::Float64,
-    action_lon::Float64
-    )
-
-    # NOTE(tim): this assumes behavior.X has already been filled
-
+function _set_and_process_action!(behavior::DynamicForestBehavior, action_lat::Float64, action_lon::Float64)
     behavior.action_clamper.x[1] = action_lat
     behavior.action_clamper.x[2] = action_lon
+    FeaturesNew.process!(behavior.action_clamper)
+    behavior.action_clamper
+end
+function _calc_action_loglikelihood(behavior::DynamicForestBehavior)
+
+    #=
+    Action should be in behavior.action_clamper and should already have been processed
+    Observations should be in behavior.processor.z and should already have been processed
+    =#
 
     ntrees = length(behavior.forest.trees)
     log_ntrees = log(ntrees)
@@ -525,25 +527,29 @@ function _calc_action_loglikelihood(
 
     logl
 end
-function calc_action_loglikelihood(
-    basics::FeatureExtractBasicsPdSet,
-    behavior::DynamicForestBehavior,
-    carind::Int,
-    validfind::Int,
-    action_lat::Float64,
-    action_lon::Float64
-    )
+# function calc_action_loglikelihood(
+#     basics::FeatureExtractBasicsPdSet,
+#     behavior::DynamicForestBehavior,
+#     carind::Int,
+#     validfind::Int,
+#     action_lat::Float64,
+#     action_lon::Float64
+#     )
 
-    #=
-    Compute the log-likelihood of the action taken during a single frame
-    given the VehicleBehaviorGaussian.
-    =#
+#     #=
+#     Compute the log-likelihood of the action taken during a single frame
+#     given the VehicleBehaviorGaussian.
+#     =#
 
-    Features.observe!(behavior.processor.x, basics, carind, validfind, behavior.indicators, replace_na=true)
-    FeaturesNew.process!(behavior.processor)
+#     Features.observe!(behavior.processor.x, basics, carind, validfind, behavior.indicators, replace_na=true)
+#     FeaturesNew.process!(behavior.processor)
 
-    _calc_action_loglikelihood(behavior, action_lat, action_lon)
-end
+#     behavior.action_clamper.x[1] = action_lat
+#     behavior.action_clamper.x[2] = action_lon
+#     FeaturesNew.process!(behavior.action_clamper)
+
+#     _calc_action_loglikelihood(behavior)
+# end
 function calc_action_loglikelihood(
     behavior::DynamicForestBehavior,
     runlog::RunLog,
@@ -562,7 +568,9 @@ function calc_action_loglikelihood(
     FeaturesNew.observe!(behavior.extractor, runlog, sn, colset, frame)
     FeaturesNew.process!(behavior.processor)
 
-    _calc_action_loglikelihood(behavior, action_lat, action_lon)
+    _set_and_process_action!(behavior, action_lat, action_lon)
+
+    _calc_action_loglikelihood(behavior)
 end
 function calc_action_loglikelihood(
     behavior::DynamicForestBehavior,
@@ -570,13 +578,14 @@ function calc_action_loglikelihood(
     frameind::Integer,
     )
 
-    action_lat = features[frameind, symbol(behavior.targets.lat)]::Float64
-    action_lon = features[frameind, symbol(behavior.targets.lon)]::Float64
-
     FeaturesNew.observe!(behavior.extractor, features, frameind)
     FeaturesNew.process!(behavior.processor)
 
-    _calc_action_loglikelihood(behavior, action_lat, action_lon)
+    action_lat = features[frameind, symbol(behavior.targets.lat)]::Float64
+    action_lon = features[frameind, symbol(behavior.targets.lon)]::Float64
+    _set_and_process_action!(behavior, action_lat, action_lon)
+
+    _calc_action_loglikelihood(behavior)
 end
 
 function train(
