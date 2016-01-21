@@ -54,6 +54,7 @@ type GMR_TrainParams <: AbstractVehicleBehaviorTrainParams
     n_PCA_features::Int # 0 means do not use PCA features, otherwise it is the number of PCA features to use
     fraction_test::Float64
     min_covar::Float64
+    unlearned_component_weight::Float64 # the weighting given to the unlearned component
 
     function GMR_TrainParams(;
         targets::ModelTargets = ModelTargets{AbstractFeature}(FUTUREDESIREDANGLE_250MS, FUTUREACCELERATION_250MS),
@@ -70,6 +71,7 @@ type GMR_TrainParams <: AbstractVehicleBehaviorTrainParams
         n_PCA_features::Integer=0,
         fraction_test::Real = 0.1,
         min_covar::Real = 0.001,
+        unlearned_component_weight::Real=0.01,
         )
 
         if eltype(indicators) <: FeaturesNew.AbstractFeature
@@ -87,6 +89,7 @@ type GMR_TrainParams <: AbstractVehicleBehaviorTrainParams
         retval.n_PCA_features = n_PCA_features
         retval.fraction_test = fraction_test
         retval.min_covar = min_covar
+        retval.unlearned_component_weight = unlearned_component_weight
 
         retval
     end
@@ -199,6 +202,7 @@ type GMRBehavior <: AbstractVehicleBehavior
     vec_b::Vector{Vector{Float64}} # [n_components [2]]
 
     # pdf(a|p), means μⱼ_ₚ and weights βⱼ(p) are functions of p and must be updated every time, covariance is constant
+    # the last component is the extra, unlearned component, and its weight is static
     mixture_Act_given_Obs::MixtureModel{Multivariate,Continuous,MvNormal}
 
     # pdf(p), all pre-computed. Used to compute βⱼ(p)
@@ -212,6 +216,7 @@ type GMRBehavior <: AbstractVehicleBehavior
         extractor::FeaturesNew.FeatureSubsetExtractor,
         processor::FeaturesNew.ChainedDataProcessor,
         processor_target::FeaturesNew.ChainedDataProcessor,
+        unlearned_component_weight::Float64,
         )
 
         weights = gmm[:weights_]::Vector{Float64} # [n_components]
@@ -222,6 +227,8 @@ type GMRBehavior <: AbstractVehicleBehavior
         # (n_features, n_features)               if 'tied',
         # (n_components, n_features)             if 'diag',
         # (n_components, n_features, n_features) if 'full'
+
+        @assert(0.0 ≤ unlearned_component_weight ≤ 1.0)
 
         n_targets = 2
         n_indicators = size(means, 2) - n_targets
@@ -268,7 +275,11 @@ type GMRBehavior <: AbstractVehicleBehavior
         retval.vec_A = vec_A
         retval.vec_b = vec_b
 
-        retval.mixture_Act_given_Obs = MixtureModel(vec_G, fill(1/n_components, n_components)) # p(action|obs), mean and weighting must be updated with each observation, cov is pre-computed
+        # add the un-learned component (needed because direct learning will NaN with outliers)
+        push!(vec_G, MvNormal([0.0,0.0], [0.01,0.1])) # TODO(tim): tune this
+        Act_given_Obs_prior = push!(fill((1-unlearned_component_weight)/n_components, n_components), unlearned_component_weight)
+
+        retval.mixture_Act_given_Obs = MixtureModel(vec_G, Act_given_Obs_prior) # p(action|obs), mean and weighting must be updated with each observation, cov is pre-computed
         retval.mixture_Obs = MixtureModel(vec_H, weights) # p(obs), all pre-computed, should never be edited
 
         retval
@@ -278,12 +289,14 @@ type GMRBehavior <: AbstractVehicleBehavior
         targets::ModelTargets{FeaturesNew.AbstractFeature},
         chosen_indicators::Vector{Int},
         preallocated_data::GMR_PreallocatedData,
+        unlearned_component_weight::Float64,
         )
 
         GMRBehavior(gmm, targets, chosen_indicators,
                     preallocated_data.extractor,
                     preallocated_data.preprocess,
-                    preallocated_data.preprocess_target)
+                    preallocated_data.preprocess_target,
+                    unlearned_component_weight)
     end
 end
 function Base.print(io::IO, GM::GMRBehavior)
@@ -331,6 +344,7 @@ function Base.print(io::IO, GM::GMRBehavior)
         @printf(io, "\t%2d: A = [%10.6f] b = [%10.6f]  Σ = [%10.6f  %10.6f]\n", i, A[2,1], b[2], Σ.mat[2,1], Σ.mat[2,2])
     end
 end
+_n_learned_components(GM::GMRBehavior) = length(GM.vec_A)
 
 function preallocate_learning_data(
     dset::ModelTrainingData,
@@ -360,11 +374,11 @@ function select_action(
     FeaturesNew.process!(behavior.processor)
 
     # condition on the mixture
-    n_components = length(behavior.vec_A)
+    n_components = _n_learned_components(behavior)
     mixture_Obs = behavior.mixture_Obs
     mixture_Act_given_Obs = behavior.mixture_Act_given_Obs
 
-    total_prior_sum = 0.0
+    total_prior_sum = mixture_Act_given_Obs.prior.p[end] # include weight from unlearned component
     for i = 1 : n_components
         mixture_Act_given_Obs.prior.p[i] = mixture_Obs.prior.p[i] * pdf(mixture_Obs.components[i], behavior.processor.z)
         total_prior_sum += mixture_Act_given_Obs.prior.p[i]
@@ -383,8 +397,12 @@ function select_action(
     component_index = rand(mixture_Act_given_Obs.prior)
     component = mixture_Act_given_Obs.components[component_index]
 
-    # modify said component with observation
-    component.μ[:] = behavior.vec_b[component_index] + behavior.vec_A[component_index]*behavior.processor.z
+    if component_index != n_components+1
+        # not the unlearned component
+
+        # modify said component with observation
+        component.μ[:] = behavior.vec_b[component_index] + behavior.vec_A[component_index]*behavior.processor.z
+    end
 
     # sample from said component
     Distributions._rand!(component, behavior.processor_target.x)
@@ -419,7 +437,7 @@ function _calc_action_loglikelihood(behavior::GMRBehavior)
 
     mixture_Act_given_Obs = behavior.mixture_Act_given_Obs
     mixture_Obs = behavior.mixture_Obs
-    n_components = length(mixture_Obs.components)
+    n_components = _n_learned_components(behavior)
 
     a = behavior.processor_target.z
     f = behavior.processor.z
@@ -525,6 +543,7 @@ function _greedy_select_next_indicator(
     current_model_logl::Float64,
     assign_test::BitVector, # if true, item is in <test>, and otherwise is in <train>
     preallocated_data::GMR_PreallocatedData,
+    unlearned_component_weight::Float64,
     )
 
     m = size(YX_orig, 1)
@@ -587,7 +606,7 @@ function _greedy_select_next_indicator(
             end
 
             something_converged = true
-            behavior = GMRBehavior(gmm, targets, train_indicator_indeces, preallocated_data)
+            behavior = GMRBehavior(gmm, targets, train_indicator_indeces, preallocated_data, unlearned_component_weight)
 
             # compute test logl
             logl = 0.0
@@ -653,6 +672,7 @@ function train(
     targets = params.targets
     indicators = params.indicators
     max_n_indicators = params.max_n_indicators
+    unlearned_component_weight = params.unlearned_component_weight
 
     target_lat = targets.lat
     target_lon = targets.lon
@@ -695,7 +715,8 @@ function train(
 
     chosen_indicators, current_model_logl, current_model = _greedy_select_next_indicator(
                 YX, targets, indicators, Int[], gmm, GMRBehavior(),
-                prev_logl, assign_test, preallocated_data)
+                prev_logl, assign_test, preallocated_data,
+                unlearned_component_weight)
 
     println("\nchosen_indicators: ", chosen_indicators, "  ", current_model_logl)
 
@@ -703,7 +724,8 @@ function train(
         prev_logl = current_model_logl
         chosen_indicators, current_model_logl, current_model = _greedy_select_next_indicator(
                                                         YX, targets, indicators, chosen_indicators, gmm,
-                                                        current_model, prev_logl, assign_test, preallocated_data)
+                                                        current_model, prev_logl, assign_test, preallocated_data,
+                                                        unlearned_component_weight)
         println("chosen_indicators: ", chosen_indicators, "  ", current_model_logl)
     end
     @assert(!isinf(current_model_logl))
