@@ -18,8 +18,7 @@ import AutomotiveDrivingModels:
     preallocate_learning_data,
     select_action,
     calc_action_loglikelihood,
-    train,
-    observe
+    train
 
 export
     GMRBehavior,
@@ -47,48 +46,53 @@ end
 type GMR_TrainParams <: AbstractVehicleBehaviorTrainParams
 
     targets::ModelTargets
-    indicators::Union{Vector{AbstractFeature},Vector{FeaturesNew.AbstractFeature}}
+    indicators::Vector{AbstractFeature}
 
+    # params for sci-kit learn GMM fitting
     n_components::Int
+    n_gmm_iter::Int # number of iterations taken during GMM fitting
+    n_init::Int # number of GMMs to attempt to fit
+    verbose::Int # defaults to 0, with 1 prints some stuff, with 2 prints more
+    tol::Float64 # tolerance on convergence, if Δlogl < tol, we have converged
+    min_covar::Float64 # minimum size of covariance matrix diagonal entry
+
+    # params for julia fitting and training
     max_n_indicators::Int
     n_PCA_features::Int # 0 means do not use PCA features, otherwise it is the number of PCA features to use
-    fraction_test::Float64
-    min_covar::Float64
     unlearned_component_weight::Float64 # the weighting given to the unlearned component
 
     function GMR_TrainParams(;
-        targets::ModelTargets = ModelTargets{AbstractFeature}(FUTUREDESIREDANGLE_250MS, FUTUREACCELERATION_250MS),
-        indicators::Union{Vector{AbstractFeature}, Vector{FeaturesNew.AbstractFeature}} = [
-                            POSFY, YAW, SPEED, DELTA_SPEED_LIMIT, VELFX, VELFY, SCENEVELFX, TURNRATE,
-                            D_CL, D_ML, D_MR, TIMETOCROSSING_LEFT, TIMETOCROSSING_RIGHT,
-                            N_LANE_L, N_LANE_R, HAS_LANE_L, HAS_LANE_R, ACC, ACCFX, ACCFY,
-                            A_REQ_STAYINLANE,
-                            HAS_FRONT, D_X_FRONT, D_Y_FRONT, V_X_FRONT, V_Y_FRONT, TTC_X_FRONT,
-                            A_REQ_FRONT, TIMEGAP_X_FRONT,
-                         ],
-        n_components::Integer=2,
-        max_n_indicators::Integer=3,
-        n_PCA_features::Integer=0,
-        fraction_test::Real = 0.1,
-        min_covar::Real = 0.001,
-        unlearned_component_weight::Real=0.01,
-        )
+        targets::ModelTargets = ModelTargets(Features.FUTUREDESIREDANGLE, Features.FUTUREACCELERATION),
+        indicators::Vector{AbstractFeature} = AbstractFeature[],
 
-        if eltype(indicators) <: FeaturesNew.AbstractFeature
-            targets = ModelTargets{FeaturesNew.AbstractFeature}(
-                            FeaturesNew.FUTUREDESIREDANGLE,
-                            FeaturesNew.FUTUREACCELERATION)
-        end
+        # params for sci-kit learn GMM fitting
+        n_components::Int = 2,
+        n_gmm_iter::Int = 100,
+        n_init::Int = 3,
+        verbose::Int = 0,
+        tol::Float64 = 1e-3,
+        min_covar::Float64 = 1e-6,
+
+        # params for julia fitting and training
+        max_n_indicators::Int = 3,
+        n_PCA_features::Int = 0,
+        unlearned_component_weight::Float64 = 0.01, # ∈ [0,1]
+        )
 
         retval = new()
 
         retval.targets = targets
         retval.indicators = indicators
+
         retval.n_components = n_components
+        retval.n_gmm_iter = n_gmm_iter
+        retval.n_init = n_init
+        retval.verbose = verbose
+        retval.tol = tol
+        retval.min_covar = min_covar
+
         retval.max_n_indicators = max_n_indicators
         retval.n_PCA_features = n_PCA_features
-        retval.fraction_test = fraction_test
-        retval.min_covar = min_covar
         retval.unlearned_component_weight = unlearned_component_weight
 
         retval
@@ -106,13 +110,13 @@ end
 
 type GMR_PreallocatedData <: AbstractVehicleBehaviorPreallocatedData
 
-    YX::Matrix{Float64} # [2+p × nframes]
+    YX::Matrix{Float64} # [nframes × 2+p]
                         # this includes both targets as 1st two columns (lat, lon)
                         # and then the predictors
 
-    extractor::FeaturesNew.FeatureSubsetExtractor
-    preprocess::FeaturesNew.DataPreprocessor
-    preprocess_target::FeaturesNew.DataPreprocessor
+    extractor::FeatureSubsetExtractor
+    preprocess::DataPreprocessor
+    preprocess_target::DataPreprocessor
 
     function GMR_PreallocatedData(dset::ModelTrainingData2, params::GMR_TrainParams)
 
@@ -132,39 +136,49 @@ type GMR_PreallocatedData <: AbstractVehicleBehaviorPreallocatedData
 
         ###########################
 
-        preprocess_target = FeaturesNew.ChainedDataProcessor(2)
-        push!(preprocess_target, Y, FeaturesNew.DataClamper)
-        FeaturesNew.process!(Y, preprocess_target.processors[end]) # process in place
-        # push!(preprocess_target, Y, FeaturesNew.DataScaler) # ensure data is standardized before running PCA
-        # FeaturesNew.process!(Y, preprocess_target.processors[end]) # process in place
+        preprocess_target = ChainedDataProcessor(2)
+        push!(preprocess_target, Y, DataClamper)
+        process!(Y, preprocess_target.processors[end]) # process in place
+        # push!(preprocess_target, Y, DataScaler) # ensure data is standardized before running PCA
+        # process!(Y, preprocess_target.processors[end]) # process in place
 
         @assert(findfirst(v->isnan(v), Y) == 0)
         @assert(findfirst(v->isinf(v), Y) == 0)
 
-        extractor = FeaturesNew.FeatureSubsetExtractor(Array(Float64, nindicators), indicators)
-        preprocess = FeaturesNew.ChainedDataProcessor(extractor)
-        push!(preprocess, X, FeaturesNew.DataNaReplacer, extractor.indicators)
-        FeaturesNew.process!(X, preprocess.processors[end]) # process in place
+        extractor = FeatureSubsetExtractor(Array(Float64, nindicators), indicators)
+        preprocess = ChainedDataProcessor(extractor)
+        push!(preprocess, X, DataNaReplacer, extractor.indicators)
+        process!(X, preprocess.processors[end]) # process in place
 
         @assert(findfirst(v->isnan(v), X) == 0)
         @assert(findfirst(v->isinf(v), X) == 0)
 
-        push!(preprocess, X, FeaturesNew.DataClamper)
-        FeaturesNew.process!(X, preprocess.processors[end]) # process in place
-        push!(preprocess, X, FeaturesNew.DataScaler) # ensure data is standardized before running PCA
-        FeaturesNew.process!(X, preprocess.processors[end]) # process in place
+        push!(preprocess, X, DataClamper)
+        process!(X, preprocess.processors[end]) # process in place
+
+        @assert(findfirst(v->isnan(v), X) == 0)
+        @assert(findfirst(v->isinf(v), X) == 0)
+
+        push!(preprocess, X, DataScaler) # ensure data is standardized before running PCA
+        process!(X, preprocess.processors[end]) # process in place
+
+        @assert(findfirst(v->isnan(v), X) == 0)
+        @assert(findfirst(v->isinf(v), X) == 0)
 
         if params.n_PCA_features > 0
             # Add a PCA scaler
-            push!(preprocess, X, FeaturesNew.DataLinearTransform, params.n_PCA_features)
+            push!(preprocess, X, DataLinearTransform, params.n_PCA_features)
 
             Z = Array(Float64, params.n_PCA_features, nframes)
-            Z = FeaturesNew.process!(Z, X, preprocess.processors[end])
+            Z = process!(Z, X, preprocess.processors[end])
 
             retval.YX = vcat(Y, Z)
         else
             retval.YX = vcat(Y, X)
         end
+
+        @assert(findfirst(v->isnan(v), retval.YX) == 0)
+        @assert(findfirst(v->isinf(v), retval.YX) == 0)
 
         retval.extractor = extractor
         retval.preprocess = preprocess
@@ -173,6 +187,222 @@ type GMR_PreallocatedData <: AbstractVehicleBehaviorPreallocatedData
         retval
     end
 end
+function preallocate_learning_data(
+    dset::ModelTrainingData2,
+    params::GMR_TrainParams)
+
+    GMR_PreallocatedData(dset, params)
+end
+
+######################################################################
+#
+#
+#
+######################################################################
+
+type GMR
+    converged::Bool
+
+    # μ₁₋₂ = μ₁ + Σ₁₂ * Σ₂₂⁻¹ * (x₂ - μ₂) = A*x₂ + b
+    vec_A::Vector{Matrix{Float64}} # [n_components [2×nindicators]]
+    vec_b::Vector{Vector{Float64}} # [n_components [2]]
+
+    # pdf(a|p), means μⱼ_ₚ and weights βⱼ(p) are functions of p and must be updated every time, covariance is constant
+    # the last component is the extra, unlearned component, and its weight is static
+    mixture_Act_given_Obs::MixtureModel{Multivariate,Continuous,MvNormal}
+
+    # pdf(p), all pre-computed. Used to compute βⱼ(p)
+    mixture_Obs::MixtureModel{Multivariate,Continuous,MvNormal} # p(obs), all pre-computed, should never be edited
+
+    function GMR(gmm::PyObject, params::GMR_TrainParams)
+
+        retval = new()
+
+        if !gmm[:converged_]
+            retval.converged = false
+        else
+
+            weights = gmm[:weights_]::Vector{Float64} # [n_components]
+            means = gmm[:means_]::Matrix{Float64}     # [n_components, n_features]
+            covars = gmm[:covars_]::Array{Float64, 3} # shape depends on covariance_type
+            @assert(gmm[:covariance_type] == "full")
+            # (n_components, n_features)             if 'spherical',
+            # (n_features, n_features)               if 'tied',
+            # (n_components, n_features)             if 'diag',
+            # (n_components, n_features, n_features) if 'full'
+
+            @assert(0.0 ≤ params.unlearned_component_weight ≤ 1.0)
+
+            n_targets = 2
+            n_indicators = size(means, 2) - n_targets
+            n_components = length(weights)
+
+            # println("n_targets:    ", n_targets)
+            # println("n_indicators: ", n_indicators)
+            # println("n_components: ", n_components)
+
+            vec_A = Array(Matrix{Float64}, n_components) # μ₁₋₂ = μ₁ + Σ₁₂ * Σ₂₂⁻¹ * (x₂ - μ₂) = A*x₂ + b
+            vec_b = Array(Vector{Float64}, n_components)
+            vec_G = Array(MvNormal, n_components)
+            vec_H = Array(MvNormal, n_components)
+
+            for i = 1 : n_components
+
+                μₐ = vec(means[i,1:n_targets])
+                μₚ = vec(means[i,n_targets+1:end])
+
+                Σ = reshape(covars[i, :, :], (n_targets + n_indicators,n_targets + n_indicators))
+
+                Σₐₐ = Σ[1:n_targets,1:n_targets]
+                Σₐₚ = Σ[1:n_targets,n_targets+1:end]
+                Σₚₚ = Σ[n_targets+1:end,n_targets+1:end]
+                iΣₚₚ = inv(Σₚₚ)
+
+                A = Σₐₚ * iΣₚₚ
+                vec_A[i] = A
+                vec_b[i] = vec(μₐ - A*μₚ)
+                C = Σₐₐ - Σₐₚ * iΣₚₚ * ((Σₐₚ)')
+
+                vec_G[i] = MvNormal(Array(Float64, n_targets), C) # p(action|obs), mean and weighting must be updated with each observation, cov is pre-computed
+                vec_H[i] = MvNormal(μₚ, Σₚₚ) # p(obs), all pre-computed, should never be edited
+            end
+
+            # add the un-learned component (needed because direct learning will NaN with outliers)
+            push!(vec_G, MvNormal([0.0,0.0], [0.01,0.1])) # TODO(tim): tune this
+            wᵤ = params.unlearned_component_weight
+            Act_given_Obs_prior = push!(fill((1-wᵤ)/n_components, n_components), wᵤ)
+
+            retval.converged = true
+            retval.vec_A = vec_A
+            retval.vec_b = vec_b
+            retval.mixture_Act_given_Obs = MixtureModel(vec_G, Act_given_Obs_prior) # p(action|obs), mean and weighting must be updated with each observation, cov is pre-computed
+            retval.mixture_Obs = MixtureModel(vec_H, weights) # p(obs), all pre-computed, should never be edited
+        end
+
+        retval
+    end
+end
+
+_n_learned_components(gmr::GMR) = length(gmr.vec_A)
+function nsuffstats(gmr::GMR)
+
+
+    dimA = length(gmr.vec_A[1])
+    n_learned_components = _n_learned_components(gmr)
+
+    n_learned_components * (2*dimA + 2 # bias
+                                   + 3 # covariance in mixture_Act_given_Obs
+                                   + div(dimA*dimA,2)) # covariance for mixture_Obs
+end
+function _calc_action_loglikelihood(gmr::GMR, a::Vector{Float64}, f::Vector{Float64})
+
+
+    mixture_Act_given_Obs = gmr.mixture_Act_given_Obs
+    mixture_Obs = gmr.mixture_Obs
+    n_learned_components = _n_learned_components(gmr)
+
+    for j in 1 : n_learned_components
+
+        # compute the β value, unweighted
+        # βⱼ(f) ∝ wⱼ Nⱼ(μₚ, Σₚ)
+        wⱼ = mixture_Obs.prior.p[j]
+        Nⱼ = mixture_Obs.components[j]
+
+        # println("a   ", a)
+        # println("f   ", f)
+        # println("wⱼ   ", wⱼ)
+        # println("Nⱼ\n", Nⱼ)
+
+        mixture_Act_given_Obs.prior.p[j] = wⱼ * pdf(Nⱼ, f)
+
+        # compute the conditional mean
+        #  μₐ_ₚ = A⋅f + b
+        A = gmr.vec_A[j]
+        b = gmr.vec_b[j]
+
+        # println("A:\n", A)
+        # println("b:\n", b)
+
+        mixture_Act_given_Obs.components[j].μ[:] = A*f + b
+    end
+
+    # normalize the β values
+    sum_β = sum(mixture_Act_given_Obs.prior.p)
+    for i in 1 : n_learned_components
+        mixture_Act_given_Obs.prior.p[i] /= sum_β
+    end
+
+    if findfirst(v->isinf(v), mixture_Act_given_Obs.prior.p) != 0 || findfirst(v->isnan(v), mixture_Act_given_Obs.prior.p) != 0
+
+        @printf("j  %10s  %10s\n", "wⱼ", "pdf(Nⱼ, f)")
+        for j in 1 : n_learned_components
+            wⱼ = mixture_Obs.prior.p[j]
+            Nⱼ = mixture_Obs.components[j]
+            @printf("%2d  %10.6f  %10.6f\n", j, wⱼ, pdf(Nⱼ, f))
+        end
+        # sleep(100)
+
+        println("INF1: ")
+        println("\t a|p prior:  ", mixture_Act_given_Obs.prior.p)
+        println("\t sum_β:      ", sum_β)
+        println("\t indicators: ", f)
+        println("\t targets:    ",    a)
+
+        sleep(0.01)
+
+        return -Inf
+    end
+
+    # compute logl using the built-in mixture
+    logl = logpdf(mixture_Act_given_Obs, a)
+
+    if isinf(logl) || isnan(logl)
+        println(mixture_Act_given_Obs.prior.p)
+        println(sum_β)
+        println("INF2: obs: ", f, "  action: ",  a)
+        sleep(0.01)
+    end
+
+    logl
+end
+function _train_model(gmm::PyObject, YX::Matrix{Float64}, chosen_indicators::Vector{Int}, params::GMR_TrainParams)
+    gmm[:fit](YX[:,[1;2;chosen_indicators+2]])
+    GMR(gmm, params)
+end
+function _calc_bic_score(gmr::GMR, YX::Matrix{Float64}, chosen_indicators::Vector{Int})
+
+    bic = -Inf
+
+    if gmr.converged
+
+        a = Array(Float64, 2)
+        f = Array(Float64, length(chosen_indicators))
+
+        m = size(YX, 2)
+        logl = 0.0
+        for i in 1 : m
+
+            a[1] = YX[1,i]
+            a[2] = YX[2,i]
+
+            for (j,p) in enumerate(chosen_indicators)
+                f[j] = YX[i, 2+p]
+            end
+
+            logl += _calc_action_loglikelihood(gmr, a, f)
+        end
+
+        logl - log(m)*nsuffstats(gmr)/2
+    end
+
+    bic
+end
+
+######################################################################
+#
+#
+#
+######################################################################
 
 type GMRBehavior <: AbstractVehicleBehavior
 
@@ -192,111 +422,29 @@ type GMRBehavior <: AbstractVehicleBehavior
             βⱼ(p) ∝ wⱼ N(μₚ, Σₚₚ)
     =#
 
-    targets::ModelTargets{FeaturesNew.AbstractFeature}
-    extractor::FeaturesNew.FeatureSubsetExtractor # - note that the extractor and processor are linked internally
-    processor::FeaturesNew.DataPreprocessor
-    processor_target::FeaturesNew.DataPreprocessor
+    gmr::GMR
+    targets::ModelTargets
+    extractor::FeatureSubsetExtractor # - note that the extractor and processor are linked internally
+    processor::DataPreprocessor
+    processor_target::DataPreprocessor
 
-    # μ₁₋₂ = μ₁ + Σ₁₂ * Σ₂₂⁻¹ * (x₂ - μ₂) = A*x₂ + b
-    vec_A::Vector{Matrix{Float64}} # [n_components [2×nindicators]]
-    vec_b::Vector{Vector{Float64}} # [n_components [2]]
-
-    # pdf(a|p), means μⱼ_ₚ and weights βⱼ(p) are functions of p and must be updated every time, covariance is constant
-    # the last component is the extra, unlearned component, and its weight is static
-    mixture_Act_given_Obs::MixtureModel{Multivariate,Continuous,MvNormal}
-
-    # pdf(p), all pre-computed. Used to compute βⱼ(p)
-    mixture_Obs::MixtureModel{Multivariate,Continuous,MvNormal} # p(obs), all pre-computed, should never be edited
-
-    GMRBehavior() = new() # dummy constructor
     function GMRBehavior(
-        gmm::PyObject,
-        targets::ModelTargets{FeaturesNew.AbstractFeature},
+        gmr::GMR,
         chosen_indicators::Vector{Int},
-        extractor::FeaturesNew.FeatureSubsetExtractor,
-        processor::FeaturesNew.ChainedDataProcessor,
-        processor_target::FeaturesNew.ChainedDataProcessor,
-        unlearned_component_weight::Float64,
+        params::GMR_TrainParams,
+        pre::GMR_PreallocatedData,
         )
 
-        weights = gmm[:weights_]::Vector{Float64} # [n_components]
-        means = gmm[:means_]::Matrix{Float64} # [n_components, n_features]
-        covars = gmm[:covars_]::Array{Float64, 3} # shape depends on covariance_type
-        @assert(gmm[:covariance_type] == "full")
-        # (n_components, n_features)             if 'spherical',
-        # (n_features, n_features)               if 'tied',
-        # (n_components, n_features)             if 'diag',
-        # (n_components, n_features, n_features) if 'full'
-
-        @assert(0.0 ≤ unlearned_component_weight ≤ 1.0)
-
-        n_targets = 2
-        n_indicators = size(means, 2) - n_targets
-        n_components = length(weights)
-        indicators = extractor.indicators[chosen_indicators]
-        @assert(length(chosen_indicators) == n_indicators)
-
-        vec_A = Array(Matrix{Float64}, n_components) # μ₁₋₂ = μ₁ + Σ₁₂ * Σ₂₂⁻¹ * (x₂ - μ₂) = A*x₂ + b
-        vec_b = Array(Vector{Float64}, n_components)
-        vec_G = Array(MvNormal, n_components)
-        vec_H = Array(MvNormal, n_components)
-
-        for i = 1 : n_components
-
-            μₐ = vec(means[i,1:n_targets])
-            μₚ = vec(means[i,n_targets+1:end])
-
-            Σ = reshape(covars[i, :, :], (n_targets + n_indicators,n_targets + n_indicators))
-
-            Σₐₐ = Σ[1:n_targets,1:n_targets]
-            Σₐₚ = Σ[1:n_targets,n_targets+1:end]
-            Σₚₚ = Σ[n_targets+1:end,n_targets+1:end]
-            iΣₚₚ = inv(Σₚₚ)
-
-            A = Σₐₚ * iΣₚₚ
-            vec_A[i] = A
-            vec_b[i] = vec(μₐ - A*μₚ)
-            C = Σₐₐ - Σₐₚ * iΣₚₚ * ((Σₐₚ)')
-
-            vec_G[i] = MvNormal(Array(Float64, n_targets), C) # p(action|obs), mean and weighting must be updated with each observation, cov is pre-computed
-            vec_H[i] = MvNormal(μₚ, Σₚₚ) # p(obs), all pre-computed, should never be edited
-        end
+        indicators = pre.extractor.indicators[chosen_indicators]
 
         retval = new()
-
-        retval.targets = targets
-        retval.extractor = FeaturesNew.FeatureSubsetExtractor(deepcopy(extractor.indicators))
-
-        retval.processor = deepcopy(processor, retval.extractor)
+        retval.gmr = gmr
+        retval.targets = params.targets
+        retval.extractor = FeatureSubsetExtractor(deepcopy(pre.extractor.indicators))
+        retval.processor = deepcopy(pre.preprocess, retval.extractor)
         push!(retval.processor, DataSubset, chosen_indicators)
-
-        retval.processor_target = deepcopy(processor_target)
-
-        retval.vec_A = vec_A
-        retval.vec_b = vec_b
-
-        # add the un-learned component (needed because direct learning will NaN with outliers)
-        push!(vec_G, MvNormal([0.0,0.0], [0.01,0.1])) # TODO(tim): tune this
-        Act_given_Obs_prior = push!(fill((1-unlearned_component_weight)/n_components, n_components), unlearned_component_weight)
-
-        retval.mixture_Act_given_Obs = MixtureModel(vec_G, Act_given_Obs_prior) # p(action|obs), mean and weighting must be updated with each observation, cov is pre-computed
-        retval.mixture_Obs = MixtureModel(vec_H, weights) # p(obs), all pre-computed, should never be edited
-
+        retval.processor_target = deepcopy(pre.preprocess_target)
         retval
-    end
-    function GMRBehavior(
-        gmm::PyObject,
-        targets::ModelTargets{FeaturesNew.AbstractFeature},
-        chosen_indicators::Vector{Int},
-        preallocated_data::GMR_PreallocatedData,
-        unlearned_component_weight::Float64,
-        )
-
-        GMRBehavior(gmm, targets, chosen_indicators,
-                    preallocated_data.extractor,
-                    preallocated_data.preprocess,
-                    preallocated_data.preprocess_target,
-                    unlearned_component_weight)
     end
 end
 function Base.print(io::IO, GM::GMRBehavior)
@@ -344,21 +492,13 @@ function Base.print(io::IO, GM::GMRBehavior)
         @printf(io, "\t%2d: A = [%10.6f] b = [%10.6f]  Σ = [%10.6f  %10.6f]\n", i, A[2,1], b[2], Σ.mat[2,1], Σ.mat[2,2])
     end
 end
-_n_learned_components(GM::GMRBehavior) = length(GM.vec_A)
+_n_learned_components(GM::GMRBehavior) = length(GM.gmr.vec_A)
 
-function preallocate_learning_data(
-    dset::ModelTrainingData,
-    params::GMR_TrainParams)
-
-    GMR_PreallocatedData(dset, params)
-end
-function preallocate_learning_data(
-    dset::ModelTrainingData2,
-    params::GMR_TrainParams)
-
-    GMR_PreallocatedData(dset, params)
-end
-
+######################################################################
+#
+#
+#
+######################################################################
 
 const TOLERANCE_ZERO_PROB_WEIGHT = 1e-20
 
@@ -370,17 +510,21 @@ function select_action(
     frame::Int
     )
 
-    FeaturesNew.observe!(behavior.extractor, runlog, sn, colset, frame)
-    FeaturesNew.process!(behavior.processor)
+    observe!(behavior.extractor, runlog, sn, colset, frame)
+    process!(behavior.processor)
+
+    f = behavior.processor.z
 
     # condition on the mixture
+    vec_A = behavior.gmr.vec_A
+    vec_b = behavior.gmr.vec_b
     n_components = _n_learned_components(behavior)
-    mixture_Obs = behavior.mixture_Obs
-    mixture_Act_given_Obs = behavior.mixture_Act_given_Obs
+    mixture_Obs = behavior.gmr.mixture_Obs
+    mixture_Act_given_Obs = behavior.gmr.mixture_Act_given_Obs
 
     total_prior_sum = mixture_Act_given_Obs.prior.p[end] # include weight from unlearned component
     for i = 1 : n_components
-        mixture_Act_given_Obs.prior.p[i] = mixture_Obs.prior.p[i] * pdf(mixture_Obs.components[i], behavior.processor.z)
+        mixture_Act_given_Obs.prior.p[i] = mixture_Obs.prior.p[i] * pdf(mixture_Obs.components[i], f)
         total_prior_sum += mixture_Act_given_Obs.prior.p[i]
     end
     if abs(total_prior_sum) < TOLERANCE_ZERO_PROB_WEIGHT
@@ -399,22 +543,13 @@ function select_action(
 
     if component_index != n_components+1
         # not the unlearned component
-
         # modify said component with observation
-        component.μ[:] = behavior.vec_b[component_index] + behavior.vec_A[component_index]*behavior.processor.z
+        component.μ[:] = vec_b[component_index] + vec_A[component_index]*f
     end
 
     # sample from said component
     Distributions._rand!(component, behavior.processor_target.x)
-    FeaturesNew.process!(behavior.processor_target)
-
-    # # reverse the scaling
-    # scale_index = findfirst(dp->isa(dp, DataScaler), behavior.processor_target.processors)
-    # scaler = behavior.processor_target.processors[scale_index]::DataScaler
-
-    # copy!(scaler.x, behavior.processor_target.z)
-    # FeaturesNew.reverse(scaler)
-    # copy!(behavior.processor_target.z, scaler.x)
+    process!(behavior.processor_target)
 
     # return the selected action
     action_lat = behavior.processor_target.z[1]
@@ -426,7 +561,7 @@ end
 function _set_and_process_action!(behavior::GMRBehavior, action_lat::Float64, action_lon::Float64)
     behavior.processor_target.x[1] = action_lat
     behavior.processor_target.x[2] = action_lon
-    FeaturesNew.process!(behavior.processor_target)
+    process!(behavior.processor_target)
     behavior.processor_target
 end
 function _calc_action_loglikelihood(behavior::GMRBehavior)
@@ -435,64 +570,9 @@ function _calc_action_loglikelihood(behavior::GMRBehavior)
     #   - observations have already been pulled and are in behavior.processor.z
     #   - action_lat and action_lon are already processed and in behavior.processor_target.z
 
-    mixture_Act_given_Obs = behavior.mixture_Act_given_Obs
-    mixture_Obs = behavior.mixture_Obs
-    n_components = _n_learned_components(behavior)
-
     a = behavior.processor_target.z
     f = behavior.processor.z
-
-    for j in 1 : n_components
-
-        # compute the β value, unweighted
-        # βⱼ(f) ∝ wⱼ Nⱼ(μₚ, Σₚ)
-        wⱼ = mixture_Obs.prior.p[j]
-        Nⱼ = mixture_Obs.components[j]
-        mixture_Act_given_Obs.prior.p[j] = wⱼ * pdf(Nⱼ, f)
-
-        # compute the conditional mean
-        #  μₐ_ₚ = A⋅f + b
-        A = behavior.vec_A[j]
-        b = behavior.vec_b[j]
-        mixture_Act_given_Obs.components[j].μ[:] = A*f + b
-    end
-
-    # normalize the β values
-    sum_β = sum(mixture_Act_given_Obs.prior.p)
-    mixture_Act_given_Obs.prior.p[:] = mixture_Act_given_Obs.prior.p ./ sum_β
-
-    if findfirst(v->isinf(v), mixture_Act_given_Obs.prior.p) != 0 || findfirst(v->isnan(v), mixture_Act_given_Obs.prior.p) != 0
-
-        @printf("j  %10s  %10s\n", "wⱼ", "pdf(Nⱼ, f)")
-        for j in 1 : n_components
-            wⱼ = mixture_Obs.prior.p[j]
-            Nⱼ = mixture_Obs.components[j]
-            @printf("%2d  %10.6f  %10.6f\n", j, wⱼ, pdf(Nⱼ, f))
-        end
-        # sleep(100)
-
-        println("INF1: ")
-        println("\t a|p prior:  ", mixture_Act_given_Obs.prior.p)
-        println("\t sum_β:      ", sum_β)
-        println("\t indicators: ", f)
-        println("\t targets:    ",    a)
-
-        sleep(0.01)
-
-        return -Inf
-    end
-
-    # compute logl using the built-in mixture
-    logl = logpdf(mixture_Act_given_Obs, a)
-
-    if isinf(logl) || isnan(logl)
-        println(mixture_Act_given_Obs.prior.p)
-        println(sum_β)
-        println("INF2: obs: ", f, "  action: ",  a)
-        sleep(0.01)
-    end
-
-    logl
+    _calc_action_loglikelihood(behavior.gmr, a, f)
 end
 
 function calc_action_loglikelihood(
@@ -510,8 +590,8 @@ function calc_action_loglikelihood(
     given the VehicleBehaviorGaussian.
     =#
 
-    FeaturesNew.observe!(behavior.extractor, runlog, sn, colset, frame)
-    FeaturesNew.process!(behavior.processor)
+    observe!(behavior.extractor, runlog, sn, colset, frame)
+    process!(behavior.processor)
 
     _set_and_process_action!(behavior, action_lat, action_lon)
 
@@ -523,8 +603,8 @@ function calc_action_loglikelihood(
     frameind::Integer,
     )
 
-    FeaturesNew.observe!(behavior.extractor, features, frameind)
-    FeaturesNew.process!(behavior.processor)
+    observe!(behavior.extractor, features, frameind)
+    process!(behavior.processor)
 
     action_lat = features[frameind, symbol(behavior.targets.lat)]::Float64
     action_lon = features[frameind, symbol(behavior.targets.lon)]::Float64
@@ -533,135 +613,14 @@ function calc_action_loglikelihood(
     _calc_action_loglikelihood(behavior)
 end
 
-function _greedy_select_next_indicator(
-    YX_orig::Matrix{Float64}, # [m, 2+p], the original dataset
-    targets::ModelTargets{FeaturesNew.AbstractFeature},
-    indicators::Vector{FeaturesNew.AbstractFeature}, # all indicators (TODO: get rid of this)
-    chosen_indicators::Vector{Int}, # indeces of chosen indicators
-    gmm::PyObject,
-    current_model::GMRBehavior,
-    current_model_logl::Float64,
-    assign_test::BitVector, # if true, item is in <test>, and otherwise is in <train>
-    preallocated_data::GMR_PreallocatedData,
-    unlearned_component_weight::Float64,
-    )
-
-    m = size(YX_orig, 1)
-    p = size(YX_orig, 2) - 2
-    n = length(assign_test) - sum(assign_test)
-    I = length(chosen_indicators)
-    YX = Array(Float64, n, 2 + I + 1)
-
-    @assert(findfirst(v->isnan(v), YX_orig) == 0)
-    @assert(findfirst(v->isinf(v), YX_orig) == 0)
-
-    # copy data into YX
-    j = 0
-    for i in 1 : m
-        if !assign_test[i]
-            j += 1
-            YX[j, 1] = YX_orig[i, 1]
-            YX[j, 2] = YX_orig[i, 2]
-            YX[j, 2+I+1] = 0.0 # set to zero for now
-            for (x,y) in enumerate(chosen_indicators)
-                YX[j, 2+x] = YX_orig[i, y]
-            end
-        end
-    end
-
-    @assert(j == n)
-    @assert(findfirst(v->isnan(v), YX) == 0)
-    @assert(findfirst(v->isinf(v), YX) == 0)
-
-    println("passed!"); sleep(0.01)
-
-    train_indicator_indeces = [chosen_indicators; typemax(Int)]
-
-    # Try all possible next features
-    # TODO(tim): parallelize?
-
-    something_converged = false
-    something_chosen = false
-
-    for y in 1 : p
-        if !in(y, chosen_indicators)
-
-            # select indicator
-            train_indicator_indeces[end] = y
-
-            # copy in the chosen indicator columns
-            j = 0
-            for i in 1 : m
-                if assign_test[i]
-                    j += 1
-                    YX[j, 2+I+1] = YX_orig[i, y+2]
-                end
-            end
-
-            # fit a model
-            gmm[:fit](YX)
-            if !gmm[:converged_]
-                println(symbol(indicators[y]), "did not converge")
-                continue
-            end
-
-            something_converged = true
-            behavior = GMRBehavior(gmm, targets, train_indicator_indeces, preallocated_data, unlearned_component_weight)
-
-            # compute test logl
-            logl = 0.0
-            for i in 1 : m
-                if assign_test[i]
-
-                    behavior.processor_target.z[1] = YX_orig[i, 1] # lat, already processed
-                    behavior.processor_target.z[2] = YX_orig[i, 2] # lon, already processed
-
-                    for (i,y₂) in enumerate(train_indicator_indeces)
-                        behavior.processor.z[i] = YX_orig[i, y₂+2] # feature, already processed
-                    end
-
-                    logl += _calc_action_loglikelihood(behavior)
-
-                    # count += 1
-                    # if count < 20
-                    #     @printf("YX test: %12.6f  %12.6f  ", YX_orig[i, 1], YX_orig[i, 2])
-                    #     for (i,j) in enumerate(train_indicator_indeces)
-                    #         @printf("%12.6f  ", YX_orig[i, j+2])
-                    #     end
-                    #     println(_calc_action_loglikelihood(behavior))
-                    # end
-                end
-            end
-            @printf("%25s %10.6f\n", string(symbol(indicators[y]))*":", logl)
-
-            # check if it is beter
-            if logl > current_model_logl
-                current_model_logl = logl
-                current_model = behavior
-
-                @assert(!in(chosen_indicators, y))
-                chosen_indicators = copy(train_indicator_indeces)
-
-                something_chosen = true
-            end
-        end
-    end
-
-    if !something_converged
-        println("NOTHING CONVERGED")
-    end
-    if !something_chosen
-        println("NOTHING CHOSEN")
-    end
-
-    # println("chosen_indicators: ", indicators[chosen_indicators])
-    # println("current_model_logl: ", current_model_logl)
-
-    (chosen_indicators, current_model_logl, current_model)
-end
+######################################################################
+#
+#
+#
+######################################################################
 
 function train(
-    training_data::ModelTrainingData2,
+    training_data::ModelTrainingData2, # TODO: do we even need this?
     preallocated_data::GMR_PreallocatedData,
     params::GMR_TrainParams,
     fold::Int,
@@ -669,71 +628,54 @@ function train(
     match_fold::Bool,
     )
 
-    targets = params.targets
-    indicators = params.indicators
-    max_n_indicators = params.max_n_indicators
-    unlearned_component_weight = params.unlearned_component_weight
-
-    target_lat = targets.lat
-    target_lon = targets.lon
-    @assert(!in(target_lat, indicators))
-    @assert(!in(target_lon, indicators))
-
-    trainingframes = training_data.dataframe_nona
-    nframes = size(trainingframes, 1)
-    features = append!([target_lat, target_lon], indicators)
-
-    # [nframes × 2+p]
     YX = copy_matrix_fold(preallocated_data.YX, fold, fold_assignment, match_fold)
-
     @assert(findfirst(v->isnan(v), YX) == 0)
     @assert(findfirst(v->isinf(v), YX) == 0)
 
-    # -------------------------------------------------------------
-    # Allocate the GMM
+    println("size of YX: ", size(YX)) # DEBUG
 
-    n_components = params.n_components # int, optional. Number of mixture components. Defaults to 1.
-    covariance_type = "full" # string, optional. ‘spherical’, ‘tied’, ‘diag’, ‘full’. Defaults to ‘diag’.
-    random_state = 1 # RandomState or an int seed (None by default)
-    min_covar = params.min_covar # float, optional
+    # -----------------------------------------
+    # run greedy ascent
+    #  - always add the next best parent
 
-    gmm = mixture.GMM(n_components=n_components, covariance_type=covariance_type,
-                      random_state=random_state, min_covar=min_covar, n_iter=1000)
+    gmm = mixture.GMM(n_components    = params.n_components, # int, optional. Number of mixture components. Defaults to 1.
+                      covariance_type = "full", # string, optional. ‘spherical’, ‘tied’, ‘diag’, ‘full’. Defaults to ‘diag’
+                      random_state    = 1, # RandomState or an int seed (None by default)
+                      min_covar       = params.min_covar, # float, optional
+                      n_iter          = params.n_gmm_iter,
+                      n_init          = params.n_init,
+                      tol             = params.tol,
+                      verbose         = params.verbose
+                      )
 
-    # -------------------------------------------------------------
-    # Assign a train/test split
+    n_indicators = size(YX, 2) - 2
+    chosen_indicators = Int[] # start with no parents
+    best_model = _train_model(gmm, YX, chosen_indicators, params)
+    best_score = _calc_bic_score(best_model, YX, chosen_indicators)
 
-    prev_logl = -Inf
-    assign_test = falses(size(YX, 1))
-    fraction_test = params.fraction_test # amount of points to use for test
-    for i = 1 : size(YX, 1)
-        assign_test[i] = rand() < fraction_test
+    finished = false
+    while !finished && length(chosen_indicators) < params.max_n_indicators
+
+        finished = true
+        test_indicators = [deepcopy(chosen_indicators); 0]
+
+        for i in 1:n_indicators
+            if !in(i, chosen_indicators)
+                test_indicators[end] = i
+                test_model = _train_model(gmm, YX, test_indicators, params)
+                test_score = _calc_bic_score(test_model, YX, test_indicators)
+
+                if test_score > best_score
+                    best_score = test_score
+                    best_model = test_model
+                    finished = false
+                    chosen_indicators = deepcopy(test_indicators)
+                end
+            end
+        end
     end
 
-    # -------------------------------------------------------------
-    # Optimize the model
-
-    chosen_indicators, current_model_logl, current_model = _greedy_select_next_indicator(
-                YX, targets, indicators, Int[], gmm, GMRBehavior(),
-                prev_logl, assign_test, preallocated_data,
-                unlearned_component_weight)
-
-    println("\nchosen_indicators: ", chosen_indicators, "  ", current_model_logl)
-
-    while prev_logl < current_model_logl && length(chosen_indicators) < max_n_indicators
-        prev_logl = current_model_logl
-        chosen_indicators, current_model_logl, current_model = _greedy_select_next_indicator(
-                                                        YX, targets, indicators, chosen_indicators, gmm,
-                                                        current_model, prev_logl, assign_test, preallocated_data,
-                                                        unlearned_component_weight)
-        println("chosen_indicators: ", chosen_indicators, "  ", current_model_logl)
-    end
-    @assert(!isinf(current_model_logl))
-
-    println("n chosen indicators: ", length(chosen_indicators))
-    println(map(f->symbol(f), indicators[chosen_indicators]))
-
-    current_model
+    GMRBehavior(best_model, chosen_indicators, params, preallocated_data)
 end
 
 end # end module

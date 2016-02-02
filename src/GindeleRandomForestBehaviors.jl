@@ -12,8 +12,7 @@ import AutomotiveDrivingModels:
     preallocate_learning_data,
     select_action,
     calc_action_loglikelihood,
-    train,
-    observe
+    train
 
 export
     GindeleRandomForestBehavior,
@@ -23,15 +22,15 @@ export
     calc_action_loglikelihood,
     train
 
-type GindeleRandomForestBehavior{F} <: AbstractVehicleBehavior
+type GindeleRandomForestBehavior <: AbstractVehicleBehavior
     model_μ::Ensemble
     model_Σ::Ensemble
 
-    targets::ModelTargets{F}
-    indicators::Vector{F}
-    extractor::FeaturesNew.FeatureSubsetExtractor
-    processor::FeaturesNew.DataPreprocessor
-    action_clamper::FeaturesNew.DataClamper
+    targets::ModelTargets
+    indicators::Vector{AbstractFeature}
+    extractor::FeatureSubsetExtractor
+    processor::DataPreprocessor
+    action_clamper::DataClamper
 
     # preallocated memory
     μ::Vector{Float64} # [2]
@@ -40,32 +39,10 @@ type GindeleRandomForestBehavior{F} <: AbstractVehicleBehavior
     function GindeleRandomForestBehavior(
         model_μ::Ensemble,
         model_Σ::Ensemble,
-        targets::ModelTargets{AbstractFeature},
-        indicators::Vector{AbstractFeature},
-        )
-
-        retval = new()
-
-        retval.model_μ = model_μ
-        retval.model_Σ = model_Σ
-
-        retval.μ = Array(Float64, 2)
-        retval.Σ = Array(Float64, 2, 2)
-
-        retval.targets = targets
-        retval.indicators = indicators
-        retval.processor = FeaturesNew.ChainedDataProcessor(retval.indicators)
-        retval.action_clamper = FeaturesNew.DataClamper(Array(Float64, 2), [-Inf, -Inf], [Inf, Inf])
-
-        retval
-    end
-    function GindeleRandomForestBehavior(
-        model_μ::Ensemble,
-        model_Σ::Ensemble,
-        targets::ModelTargets{FeaturesNew.AbstractFeature},
-        extractor::FeaturesNew.FeatureSubsetExtractor,
-        processor::FeaturesNew.ChainedDataProcessor,
-        action_clamper::FeaturesNew.DataClamper,
+        targets::ModelTargets,
+        extractor::FeatureSubsetExtractor,
+        processor::ChainedDataProcessor,
+        action_clamper::DataClamper,
         )
 
         retval = new()
@@ -75,9 +52,9 @@ type GindeleRandomForestBehavior{F} <: AbstractVehicleBehavior
 
         retval.targets = targets
         # copy the processor and ensure that the copied io arrays match up
-        retval.extractor = FeaturesNew.FeatureSubsetExtractor(deepcopy(extractor.x), extractor.indicators)
+        retval.extractor = FeatureSubsetExtractor(deepcopy(extractor.x), extractor.indicators)
         retval.processor = deepcopy(processor, retval.extractor)
-        retval.action_clamper = FeaturesNew.DataClamper(Array(Float64, 2),
+        retval.action_clamper = DataClamper(Array(Float64, 2),
                                    deepcopy(action_clamper.f_lo),
                                    deepcopy(action_clamper.f_hi))
 
@@ -90,7 +67,7 @@ end
 type GRF_TrainParams <: AbstractVehicleBehaviorTrainParams
 
     targets::ModelTargets
-    indicators::Union{Vector{AbstractFeature}, Vector{FeaturesNew.AbstractFeature}}
+    indicators::Vector{AbstractFeature}
 
     ntrees::Int # number of trees in the forest
     max_tree_depth::Int # max depth for trees in the forest
@@ -103,13 +80,9 @@ type GRF_TrainParams <: AbstractVehicleBehaviorTrainParams
     partial_sampling::Float64 # percentage of dataset to sample
 
     function GRF_TrainParams(;
-        targets::ModelTargets = ModelTargets{AbstractFeature}(FUTUREDESIREDANGLE_250MS, FUTUREACCELERATION_250MS),
-        indicators::Union{Vector{AbstractFeature}, Vector{FeaturesNew.AbstractFeature}} = [
-                        POSFY, YAW, SPEED, DELTA_SPEED_LIMIT, VELFX, VELFY, SCENEVELFX, TURNRATE,
-                        D_CL, D_ML, D_MR, TIMETOCROSSING_LEFT, TIMETOCROSSING_RIGHT,
-                        N_LANE_L, N_LANE_R, HAS_LANE_L, HAS_LANE_R, ACC, ACCFX, ACCFY,
-                        A_REQ_STAYINLANE,
-                     ],
+        targets::ModelTargets = ModelTargets(Features.FUTUREDESIREDANGLE, Features.FUTUREACCELERATION),
+        indicators::Vector{AbstractFeature} = AbstractFeature[],
+
         ntrees::Integer=10,
         max_tree_depth::Integer=5,
         min_samples_split::Integer=100,
@@ -119,12 +92,6 @@ type GRF_TrainParams <: AbstractVehicleBehaviorTrainParams
         min_split_improvement::Float64=0.0,
         partial_sampling::Float64=0.7,
         )
-
-        if eltype(indicators) <: FeaturesNew.AbstractFeature
-            targets = ModelTargets{FeaturesNew.AbstractFeature}(
-                            FeaturesNew.FUTUREDESIREDANGLE,
-                            FeaturesNew.FUTUREACCELERATION)
-        end
 
         retval = new()
         retval.targets = targets
@@ -148,11 +115,8 @@ type GRF_PreallocatedData <: AbstractVehicleBehaviorPreallocatedData
 
     extractor::FeatureSubsetExtractor
     preprocess::DataPreprocessor
-    action_clamper::FeaturesNew.DataClamper
+    action_clamper::DataClamper
 
-    function GRF_PreallocatedData(dset::ModelTrainingData, params::GRF_TrainParams)
-        new()
-    end
     function GRF_PreallocatedData(dset::ModelTrainingData2, params::GRF_TrainParams)
         retval = new()
 
@@ -170,18 +134,18 @@ type GRF_PreallocatedData <: AbstractVehicleBehaviorPreallocatedData
 
         extractor = FeatureSubsetExtractor(Array(Float64, nindicators), indicators)
         preprocess = ChainedDataProcessor(extractor)
-        push!(preprocess, X, FeaturesNew.DataNaReplacer, extractor.indicators)
-        FeaturesNew.process!(X, preprocess.processors[end]) # process in place
-        push!(preprocess, X, FeaturesNew.DataScaler) # ensure data is standardized before running PCA
-        FeaturesNew.process!(X, preprocess.processors[end]) # process in place
+        push!(preprocess, X, DataNaReplacer, extractor.indicators)
+        process!(X, preprocess.processors[end]) # process in place
+        push!(preprocess, X, DataScaler) # ensure data is standardized before running PCA
+        process!(X, preprocess.processors[end]) # process in place
 
         if params.n_PCA_features > 0
             # Add a PCA scaler
 
-            push!(preprocess, X, FeaturesNew.DataLinearTransform, params.n_PCA_features)
+            push!(preprocess, X, DataLinearTransform, params.n_PCA_features)
 
             Z = Array(Float64, params.n_PCA_features, nframes)
-            Z = FeaturesNew.process!(Z, X, preprocess.processors[end])
+            Z = process!(Z, X, preprocess.processors[end])
 
             retval.X = Z # use the smaller one
         else
@@ -191,7 +155,7 @@ type GRF_PreallocatedData <: AbstractVehicleBehaviorPreallocatedData
         retval.Y = Y
         retval.extractor = extractor
         retval.preprocess = preprocess
-        retval.action_clamper = FeaturesNew.DataClamper(
+        retval.action_clamper = DataClamper(
                 Array(Float64, 2),
                 vec(minimum(Y, 2)),
                 vec(maximum(Y, 2))
@@ -201,12 +165,6 @@ type GRF_PreallocatedData <: AbstractVehicleBehaviorPreallocatedData
     end
 end
 
-function preallocate_learning_data(
-    dset::ModelTrainingData,
-    params::GRF_TrainParams)
-
-    GRF_PreallocatedData(dset, params)
-end
 function preallocate_learning_data(
     dset::ModelTrainingData2,
     params::GRF_TrainParams)
@@ -223,26 +181,6 @@ function _calc_mvnormal(behavior::GindeleRandomForestBehavior)
 end
 
 function select_action(
-    basics::FeatureExtractBasicsPdSet,
-    behavior::GindeleRandomForestBehavior,
-    carind::Int,
-    validfind::Int
-    )
-
-    Features.observe!(behavior.processor.x, basics, carind, validfind, behavior.indicators, replace_na=true)
-    FeaturesNew.process!(behavior.processor)
-
-    normal = _calc_mvnormal(behavior)
-
-    Distributions._rand!(normal, behavior.action_clamper.x)
-    FeaturesNew.process!(behavior.action_clamper)
-
-    action_lat = behavior.action_clamper.x[1]
-    action_lon = behavior.action_clamper.x[2]
-
-    (action_lat, action_lon)
-end
-function select_action(
     behavior::GindeleRandomForestBehavior,
     runlog::RunLog,
     sn::StreetNetwork,
@@ -250,13 +188,13 @@ function select_action(
     frame::Int
     )
 
-    FeaturesNew.observe!(behavior.extractor, runlog, sn, colset, frame)
-    FeaturesNew.process!(behavior.processor)
+    observe!(behavior.extractor, runlog, sn, colset, frame)
+    process!(behavior.processor)
 
     normal = _calc_mvnormal(behavior)
 
     Distributions._rand!(normal, behavior.action_clamper.x)
-    FeaturesNew.process!(behavior.action_clamper)
+    process!(behavior.action_clamper)
 
     action_lat = behavior.action_clamper.x[1]
     action_lon = behavior.action_clamper.x[2]
@@ -264,29 +202,6 @@ function select_action(
     (action_lat, action_lon)
 end
 
-function calc_action_loglikelihood(
-    basics::FeatureExtractBasicsPdSet,
-    behavior::GindeleRandomForestBehavior,
-    carind::Int,
-    validfind::Int,
-    action_lat::Float64,
-    action_lon::Float64
-    )
-
-    #=
-    Compute the log-likelihood of the action taken during a single frame
-    given the VehicleBehaviorGaussian.
-    =#
-
-    behavior.action_clamper.x[1] = action_lat
-    behavior.action_clamper.x[2] = action_lon
-
-    Features.observe!(behavior.processor.x, basics, carind, validfind, behavior.indicators, replace_na=true)
-    FeaturesNew.process!(behavior.processor)
-
-    normal = _calc_mvnormal(behavior)
-    logpdf(normal, behavior.action_clamper.x)
-end
 function calc_action_loglikelihood(
     behavior::GindeleRandomForestBehavior,
     runlog::RunLog,
@@ -305,8 +220,8 @@ function calc_action_loglikelihood(
     behavior.action_clamper.x[1] = action_lat
     behavior.action_clamper.x[2] = action_lon
 
-    FeaturesNew.observe!(behavior.extractor, runlog, sn, colset, frame)
-    FeaturesNew.process!(behavior.processor)
+    observe!(behavior.extractor, runlog, sn, colset, frame)
+    process!(behavior.processor)
 
     normal = _calc_mvnormal(behavior)
     logpdf(normal, behavior.action_clamper.x)
@@ -320,8 +235,8 @@ function calc_action_loglikelihood(
     behavior.action_clamper.x[1] = features[frameind, symbol(behavior.targets.lat)]::Float64
     behavior.action_clamper.x[2] = features[frameind, symbol(behavior.targets.lon)]::Float64
 
-    FeaturesNew.observe!(behavior.extractor, features, frameind)
-    FeaturesNew.process!(behavior.processor)
+    observe!(behavior.extractor, features, frameind)
+    process!(behavior.processor)
 
     apply_forest!(behavior.μ, behavior.model_μ, behavior.processor.z)
     apply_forest!(behavior.Σ, behavior.model_Σ, behavior.processor.z)
@@ -330,82 +245,6 @@ function calc_action_loglikelihood(
     logpdf(mvnorm_model, behavior.action_clamper.x)
 end
 
-function train(
-    training_data::ModelTrainingData,
-    preallocated_data::GRF_PreallocatedData,
-    params::GRF_TrainParams,
-    fold::Int,
-    fold_assignment::FoldAssignment,
-    match_fold::Bool,
-    )
-
-    targets = params.targets
-    indicators = params.indicators
-    ntrees = params.ntrees
-    max_tree_depth = params.max_tree_depth
-    min_samples_split = params.min_samples_split
-    min_samples_leaves = params.min_samples_leaves
-    n_split_tries = params.n_split_tries
-    min_split_improvement = params.min_split_improvement
-    partial_sampling = params.partial_sampling
-
-    #######
-
-    build_tree_params = BuildTreeParameters(
-        ntrees, max_tree_depth, min_samples_split, min_samples_leaves,
-        min_split_improvement, n_split_tries, LossFunction_MSE, MeanVecLeaf)
-
-    trainingframes = training_data.dataframe_nona
-    nframes = size(trainingframes, 1)
-
-    X = Array(Float64, nframes, length(indicators))
-    y = Array(Float64, 2, nframes)
-
-    df_ncol = ncol(trainingframes)
-    df_names = names(trainingframes)
-
-    total = 0
-    for row = 1 : nframes
-
-        action_lat = trainingframes[row, :f_des_angle_250ms]
-        action_lon = trainingframes[row, :f_accel_250ms]
-
-        if !isinf(action_lat) && !isinf(action_lon) &&
-            !any(feature->isnan(trainingframes[row,symbol(feature)]), indicators) &&
-            is_in_fold(fold, fold_assignment.frame_assignment[row], match_fold)
-
-            total += 1
-
-            for (col, feature) in enumerate(indicators)
-                v = trainingframes[row, symbol(feature)]
-                if isinf(v)
-                    error("DynamicForestBehaviors.calc_action_loglikelihood: INF v!")
-                end
-                X[total, col] = v
-            end
-
-            y[1, total] = action_lat
-            y[2, total] = action_lon
-        end
-    end
-    y = y[:, 1:total]::Matrix{Float64}
-    X = X[1:total, :]::Matrix{Float64}
-
-    μ = build_forest(y, X, ntrees, build_tree_params, partial_sampling)
-
-    mean_vector = Array(Float64, 2)
-    for i = 1 : size(y, 1)
-        y[:,i] -= apply_forest!(mean_vector, μ, vec(X[i,:])) # subtract the predicted mean
-    end
-
-    build_tree_params = BuildTreeParameters(
-        ntrees, max_tree_depth, min_samples_split, min_samples_leaves,
-        min_split_improvement, n_split_tries, LossFunction_MSE, CovLeaf)
-
-    Σ = build_forest(y, X, ntrees, build_tree_params, partial_sampling)
-
-    GindeleRandomForestBehavior{AbstractFeature}(μ, Σ, targets, convert(Vector{AbstractFeature}, indicators))
-end
 function train(
     training_data::ModelTrainingData2,
     preallocated_data::GRF_PreallocatedData,
@@ -469,7 +308,7 @@ function train(
     extractor = preallocated_data.extractor
     preprocess = preallocated_data.preprocess
     action_clamper = preallocated_data.action_clamper
-    GindeleRandomForestBehavior{FeaturesNew.AbstractFeature}(μ, Σ, targets, extractor, preprocess, action_clamper)
+    GindeleRandomForestBehavior(μ, Σ, targets, extractor, preprocess, action_clamper)
 end
 
 end # end module
