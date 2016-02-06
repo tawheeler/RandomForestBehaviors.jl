@@ -58,11 +58,11 @@ type GMR_TrainParams <: AbstractVehicleBehaviorTrainParams
 
     # params for julia fitting and training
     max_n_indicators::Int
-    n_PCA_features::Int # 0 means do not use PCA features, otherwise it is the number of PCA features to use
+    use_PCA::Bool
     unlearned_component_weight::Float64 # the weighting given to the unlearned component
 
     function GMR_TrainParams(;
-        targets::ModelTargets = ModelTargets(Features.FUTUREDESIREDANGLE, Features.FUTUREACCELERATION),
+        targets::ModelTargets = ModelTargets(FUTUREDESIREDANGLE, FUTUREACCELERATION),
         indicators::Vector{AbstractFeature} = AbstractFeature[],
 
         # params for sci-kit learn GMM fitting
@@ -75,7 +75,7 @@ type GMR_TrainParams <: AbstractVehicleBehaviorTrainParams
 
         # params for julia fitting and training
         max_n_indicators::Int = 3,
-        n_PCA_features::Int = 0,
+        use_PCA::Bool = false,
         unlearned_component_weight::Float64 = 0.01, # ∈ [0,1]
         )
 
@@ -92,7 +92,7 @@ type GMR_TrainParams <: AbstractVehicleBehaviorTrainParams
         retval.min_covar = min_covar
 
         retval.max_n_indicators = max_n_indicators
-        retval.n_PCA_features = n_PCA_features
+        retval.use_PCA = use_PCA
         retval.unlearned_component_weight = unlearned_component_weight
 
         retval
@@ -104,7 +104,7 @@ function Base.print(io::IO, θ::GMR_TrainParams)
     println(io, "\tindicators: ", map(f->symbol(f), θ.indicators))
     println(io, "\tn_components:     ", θ.n_components)
     println(io, "\tmax_n_indicators: ", θ.max_n_indicators)
-    println(io, "\tn_PCA_features:   ", θ.n_PCA_features)
+    println(io, "\tuse_PCA:   ", θ.use_PCA)
     println(io, "\tmin_covar:        ", θ.min_covar)
 end
 
@@ -113,9 +113,12 @@ type GMR_PreallocatedData <: AbstractVehicleBehaviorPreallocatedData
     YX::Matrix{Float64} # [nframes × 2+p]
                         # this includes both targets as 1st two columns (lat, lon)
                         # and then the predictors
+    YZ::Matrix{Float64} # [nframes × 2+p]
+                        # this uses PCA'd predictors
 
     extractor::FeatureSubsetExtractor
     preprocess::DataPreprocessor
+    preprocess_pca::DataPreprocessor
     preprocess_target::DataPreprocessor
 
     function GMR_PreallocatedData(dset::ModelTrainingData2, params::GMR_TrainParams)
@@ -165,23 +168,25 @@ type GMR_PreallocatedData <: AbstractVehicleBehaviorPreallocatedData
         @assert(findfirst(v->isnan(v), X) == 0)
         @assert(findfirst(v->isinf(v), X) == 0)
 
-        if params.n_PCA_features > 0
-            # Add a PCA scaler
-            push!(preprocess, X, DataLinearTransform, params.n_PCA_features)
-
-            Z = Array(Float64, params.n_PCA_features, nframes)
-            Z = process!(Z, X, preprocess.processors[end])
-
-            retval.YX = vcat(Y, Z)
-        else
-            retval.YX = vcat(Y, X)
-        end
-
+        retval.YX = vcat(Y, copy(X))
         @assert(findfirst(v->isnan(v), retval.YX) == 0)
         @assert(findfirst(v->isinf(v), retval.YX) == 0)
 
+        # Add a PCA scaler
+        preprocess_pca = deepcopy(preprocess)
+        n_PCA_features = min(nindicators, 20)
+        push!(preprocess_pca, X, DataLinearTransform, n_PCA_features)
+
+        Z = Array(Float64, n_PCA_features, nframes)
+        Z = process!(Z, X, preprocess_pca.processors[end])
+
+        retval.YZ = vcat(Y, Z)
+        @assert(findfirst(v->isnan(v), retval.YZ) == 0)
+        @assert(findfirst(v->isinf(v), retval.YZ) == 0)
+
         retval.extractor = extractor
         retval.preprocess = preprocess
+        retval.preprocess_pca = preprocess_pca
         retval.preprocess_target = preprocess_target
 
         retval
@@ -436,12 +441,13 @@ type GMRBehavior <: AbstractVehicleBehavior
         )
 
         indicators = pre.extractor.indicators[chosen_indicators]
+        preprocess = params.use_PCA > 0 ? pre.preprocess_pca : pre.preprocess
 
         retval = new()
         retval.gmr = gmr
         retval.targets = params.targets
         retval.extractor = FeatureSubsetExtractor(deepcopy(pre.extractor.indicators))
-        retval.processor = deepcopy(pre.preprocess, retval.extractor)
+        retval.processor = deepcopy(preprocess, retval.extractor)
         push!(retval.processor, DataSubset, chosen_indicators)
         retval.processor_target = deepcopy(pre.preprocess_target)
         retval
@@ -623,16 +629,15 @@ function train(
     training_data::ModelTrainingData2, # TODO: do we even need this?
     preallocated_data::GMR_PreallocatedData,
     params::GMR_TrainParams,
-    fold::Int,
-    fold_assignment::FoldAssignment,
-    match_fold::Bool,
+    foldset::FoldSet,
     )
 
-    YX = copy_matrix_fold(preallocated_data.YX, fold, fold_assignment, match_fold)
+    YX = params.use_PCA ?
+            copy_matrix_fold(preallocated_data.YZ, foldset) :
+            copy_matrix_fold(preallocated_data.YX, foldset)
+
     @assert(findfirst(v->isnan(v), YX) == 0)
     @assert(findfirst(v->isinf(v), YX) == 0)
-
-    println("size of YX: ", size(YX)) # DEBUG
 
     # -----------------------------------------
     # run greedy ascent
@@ -649,12 +654,13 @@ function train(
                       )
 
     n_indicators = size(YX, 2) - 2
+    max_n_indicators = min(params.max_n_indicators, n_indicators)
     chosen_indicators = Int[] # start with no parents
     best_model = _train_model(gmm, YX, chosen_indicators, params)
     best_score = _calc_bic_score(best_model, YX, chosen_indicators)
 
     finished = false
-    while !finished && length(chosen_indicators) < params.max_n_indicators
+    while !finished && length(chosen_indicators) < max_n_indicators
 
         finished = true
         test_indicators = [deepcopy(chosen_indicators); 0]

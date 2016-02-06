@@ -216,45 +216,6 @@ end
 
 ################################################################
 
-type DynamicForestBehavior <: AbstractVehicleBehavior
-    forest::Ensemble
-
-    targets::ModelTargets
-    indicators::Vector{AbstractVehicleBehavior}
-    extractor::FeatureSubsetExtractor
-    processor::DataPreprocessor
-    action_clamper::DataClamper # contains action vector and clamping range
-
-    # preallocated memory
-    ϕ::Vector{Float64} # [n_predictors+1] (last one is always 1.0)
-
-    function DynamicForestBehavior(
-        forest::Ensemble,
-        n_predictors::Int,
-        targets::ModelTargets,
-        extractor::FeatureSubsetExtractor,
-        processor::ChainedDataProcessor,
-        action_clamper::DataClamper,
-        )
-
-        retval = new()
-
-        retval.forest = forest
-        retval.targets = targets
-
-        # copy the processor and ensure that the copied io arrays match up
-        retval.extractor = FeatureSubsetExtractor(deepcopy(extractor.x), extractor.indicators)
-        retval.processor = deepcopy(processor, retval.extractor)
-        retval.action_clamper = DataClamper(Array(Float64, 2),
-                                   deepcopy(action_clamper.f_lo),
-                                   deepcopy(action_clamper.f_hi))
-
-        retval.ϕ = Array(Float64, n_predictors+1)
-
-        retval
-    end
-end
-
 type DF_TrainParams <: AbstractVehicleBehaviorTrainParams
 
     targets::ModelTargets
@@ -267,13 +228,11 @@ type DF_TrainParams <: AbstractVehicleBehaviorTrainParams
     min_samples_leaves::Int
     n_random_predictor_samples::Int
     n_autoregression_predictors::Int
-    n_PCA_features::Int # 0 means do not use PCA features, otherwise it is the number of PCA features to use
+    use_PCA::Bool
 
     min_split_improvement::Float64
     partial_sampling::Float64
     autogression_coef::Float64
-
-
 
     function DF_TrainParams(;
         targets::ModelTargets = ModelTargets(Features.FUTUREDESIREDANGLE, Features.FUTUREACCELERATION),
@@ -286,7 +245,7 @@ type DF_TrainParams <: AbstractVehicleBehaviorTrainParams
         min_samples_leaves::Integer=20,
         n_random_predictor_samples::Integer=10,
         n_autoregression_predictors::Integer=2,
-        n_PCA_features::Integer=0,
+        use_PCA::Bool=false,
         min_split_improvement::Float64=0.0,
         partial_sampling::Float64=0.7,
         autogression_coef::Float64=0.1,
@@ -302,7 +261,7 @@ type DF_TrainParams <: AbstractVehicleBehaviorTrainParams
         retval.min_samples_leaves = min_samples_leaves
         retval.n_random_predictor_samples = n_random_predictor_samples
         retval.n_autoregression_predictors = n_autoregression_predictors
-        retval.n_PCA_features = n_PCA_features
+        retval.use_PCA = use_PCA
         retval.min_split_improvement = min_split_improvement
         retval.partial_sampling = partial_sampling
         retval.autogression_coef = autogression_coef
@@ -314,9 +273,11 @@ type DF_PreallocatedData <: AbstractVehicleBehaviorPreallocatedData
     # the full dataset matrices pre-extracted
     X::Matrix{Float64} # [nfeatures × nframes]
     Y::Matrix{Float64} # [2 × nframes]
+    Z::Matrix{Float64} # [n_pca_features × nframes]
 
     extractor::FeatureSubsetExtractor
     preprocess::DataPreprocessor
+    preprocess_pca::DataPreprocessor
     action_clamper::DataClamper
 
     function DF_PreallocatedData(dset::ModelTrainingData2, params::DF_TrainParams)
@@ -342,28 +303,64 @@ type DF_PreallocatedData <: AbstractVehicleBehaviorPreallocatedData
         process!(X, preprocess.processors[end]) # process in place
         push!(preprocess, X, DataScaler) # ensure data is standardized before running PCA
         process!(X, preprocess.processors[end]) # process in place
+        retval.X = copy(X)
 
-        if params.n_PCA_features > 0
-            # Add a PCA scaler
-            push!(preprocess, X, DataLinearTransform, params.n_PCA_features)
+        # Add a PCA scaler
+        preprocess_pca = deepcopy(preprocess)
+        n_PCA_features = min(nindicators, 20)
+        push!(preprocess_pca, X, DataLinearTransform, n_PCA_features)
 
-            Z = Array(Float64, params.n_PCA_features, nframes)
-            Z = process!(Z, X, preprocess.processors[end])
-
-            retval.X = Z # use the smaller one
-        else
-            retval.X = X
-        end
-
+        Z = Array(Float64, n_PCA_features, nframes)
+        retval.Z = process!(Z, X, preprocess_pca.processors[end])
 
         retval.Y = Y
         retval.extractor = extractor
         retval.preprocess = preprocess
+        retval.preprocess_pca = preprocess_pca
         retval.action_clamper = DataClamper(
                 Array(Float64, 2),
                 vec(minimum(Y, 2)),
                 vec(maximum(Y, 2))
             )
+
+        retval
+    end
+end
+type DynamicForestBehavior <: AbstractVehicleBehavior
+    forest::Ensemble
+
+    targets::ModelTargets
+    indicators::Vector{AbstractVehicleBehavior}
+    extractor::FeatureSubsetExtractor
+    processor::DataPreprocessor
+    action_clamper::DataClamper # contains action vector and clamping range
+
+    # preallocated memory
+    ϕ::Vector{Float64} # [n_predictors+1] (last one is always 1.0)
+
+    function DynamicForestBehavior(
+        forest::Ensemble,
+        n_predictors::Int,
+        params::DF_TrainParams,
+        pre::DF_PreallocatedData,
+        )
+
+        extractor = pre.extractor
+        action_clamper = pre.action_clamper
+        processor = params.use_PCA ? pre.preprocess_pca : pre.preprocess
+
+        retval = new()
+        retval.forest = forest
+        retval.targets = params.targets
+
+        # copy the processor and ensure that the copied io arrays match up
+        retval.extractor = FeatureSubsetExtractor(deepcopy(extractor.x), extractor.indicators)
+        retval.processor = deepcopy(processor, retval.extractor)
+        retval.action_clamper = DataClamper(Array(Float64, 2),
+                                   deepcopy(action_clamper.f_lo),
+                                   deepcopy(action_clamper.f_hi))
+
+        retval.ϕ = Array(Float64, n_predictors+1)
 
         retval
     end
@@ -503,16 +500,11 @@ function train(
     training_data::ModelTrainingData2,
     preallocated_data::DF_PreallocatedData,
     params::DF_TrainParams,
-    fold::Int,
-    fold_assignment::FoldAssignment,
-    match_fold::Bool,
+    foldset::FoldSet,
     )
 
     extractor = preallocated_data.extractor
-    preprocess = preallocated_data.preprocess
-    action_clamper = preallocated_data.action_clamper
 
-    targets = params.targets
     ntrees = params.ntrees
     max_tree_depth = params.max_tree_depth
     n_split_tries = params.n_split_tries
@@ -524,7 +516,7 @@ function train(
     partial_sampling = params.partial_sampling
     autogression_coef = params.autogression_coef
 
-    X_orig = preallocated_data.X # NOTE: already preprocessed and everything
+    X_orig = params.use_PCA ? preallocated_data.Z : preallocated_data.X
     Y_orig = preallocated_data.Y
 
     # TODO(tim): do this without globals
@@ -543,32 +535,25 @@ function train(
         AutoregressiveMvNormLeaf
         )
 
-    @assert(length(fold_assignment.frame_assignment) == size(X_orig, 2))
-    @assert(length(fold_assignment.frame_assignment) == size(Y_orig, 2))
-
-    nframes = calc_fold_size(fold, fold_assignment.frame_assignment, match_fold)
+    nframes = length(foldset)
     X = Array(Float64, nframes, size(X_orig, 1)) # NOTE: this is transpose of X_orig
     y = Array(Float64, 2, nframes)
 
     i = 0
-    for (frame, fold_a) in enumerate(fold_assignment.frame_assignment)
-        if is_in_fold(fold, fold_a, match_fold)
-            i += 1
+    for frame in foldset
+        i += 1
 
-            for j in 1 : size(X_orig, 1)
-                X[i,j] = X_orig[j,frame]
-            end
-
-            y[1,i] = Y_orig[1,frame]
-            y[2,i] = Y_orig[2,frame]
+        for j in 1 : size(X_orig, 1)
+            X[i,j] = X_orig[j,frame]
         end
+
+        y[1,i] = Y_orig[1,frame]
+        y[2,i] = Y_orig[2,frame]
     end
     @assert(i == nframes)
 
     ensemble = build_forest(y, X, ntrees, build_tree_params, partial_sampling)
-    DynamicForestBehavior(
-                    ensemble, n_autoregression_predictors, targets,
-                    extractor, preprocess, action_clamper)
+    DynamicForestBehavior(ensemble, n_autoregression_predictors, params, preallocated_data)
 end
 
 end # end module
