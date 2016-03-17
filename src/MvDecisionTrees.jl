@@ -23,7 +23,9 @@ export
     build_leaf,
     build_tree,
     build_forest,
-    build_tree_parameters
+    build_tree_parameters,
+
+    get_split_index_set
 
 import Distributions: MvNormal, fit_mle
 import StatsBase: cov
@@ -988,6 +990,33 @@ function build_forest{T<:AbstractFloat, U<:Real}(labels::Matrix{T}, features::Ma
 end
 
 #####################################
+# analysis functions
+
+get_split_index_set(leaf::Leaf) = Set{Int}()
+function get_split_index_set(tree::InternalNode)
+    # returns a Set{Int} of indeces used as splits in the tree
+    retval = Set{Int}()
+    push!(retval, tree.featid)
+    for featid in get_split_index_set(tree.left)
+        push!(retval, featid)
+    end
+    for featid in get_split_index_set(tree.right)
+        push!(retval, featid)
+    end
+    retval
+end
+function get_split_index_set{L<:Leaf}(forest::Ensemble{L})
+    # returns a Set{Int} of indeces used as splits in the forest
+    retval = Set{Int}()
+    for tree in forest.trees
+        for featid in get_split_index_set(tree)
+            push!(retval, featid)
+        end
+    end
+    retval
+end
+
+#####################################
 # helper functions
 
 function _calc_covariance!{T, U}(
@@ -1046,7 +1075,7 @@ function _calc_covariance!{T, U}(
 end
 function _diagonal_shrinkage!{T<:Real}(
     Σ::Matrix{T}, # 2×2 matrix with upper diagonal filled in
-                  # this method ONLY affect the upper diagonal
+                  # this method ONLY affects the upper diagonal
     ε::T = convert(T, 1e-6),
     )
 

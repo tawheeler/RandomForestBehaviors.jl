@@ -164,6 +164,22 @@ type GindeleRandomForestBehavior <: AbstractVehicleBehavior
         retval
     end
 end
+AutomotiveDrivingModels.get_targets(behavior::GindeleRandomForestBehavior) = behavior.targets
+function AutomotiveDrivingModels.get_indicators(behavior::GindeleRandomForestBehavior)
+
+    # run through and pull the indicators that are actually used in the tree
+
+    indicators = Set{AbstractFeature}()
+
+    for index in get_split_index_set(behavior.model_μ)
+        push!(indicators, behavior.extractor.indicators[index])
+    end
+    for index in get_split_index_set(behavior.model_Σ)
+        push!(indicators, behavior.extractor.indicators[index])
+    end
+
+    return collect(indicators)
+end
 
 function preallocate_learning_data(
     dset::ModelTrainingData2,

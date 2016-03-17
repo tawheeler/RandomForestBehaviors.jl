@@ -24,6 +24,7 @@ export
     calc_action_loglikelihood,
     train
 
+global GLOBAL_DIAG_SHRINKAGE_THRESOLD = 1e-6
 DEFAULT_AUTOREGRESSION_CONSTANT = 0.5
 DEFAULT_NUM_AUTOREGRESSION_PREDICTORS = 3
 DEFAULT_NUM_PREDICTOR_SAMPLES = 10
@@ -203,7 +204,9 @@ function MvDecisionTrees.build_leaf{T<:AbstractFloat, S<:Real}(::Type{Autoregres
             @assert(!isnan(Σ[i]))
             Σ[i] /= (id_count-1)
         end
-        MvDecisionTrees._diagonal_shrinkage!(Σ)
+
+        ε = GLOBAL_DIAG_SHRINKAGE_THRESOLD
+        MvDecisionTrees._diagonal_shrinkage!(Σ, ε)
         for a in 2:o
             for b in 1:a-1
                 Σ[a,b] = Σ[b,a]
@@ -230,6 +233,7 @@ type DF_TrainParams <: AbstractVehicleBehaviorTrainParams
     n_autoregression_predictors::Int
     use_PCA::Bool
 
+    diag_shrinkage_threshold::Float64
     min_split_improvement::Float64
     partial_sampling::Float64
     autogression_coef::Float64
@@ -246,6 +250,8 @@ type DF_TrainParams <: AbstractVehicleBehaviorTrainParams
         n_random_predictor_samples::Integer=10,
         n_autoregression_predictors::Integer=2,
         use_PCA::Bool=false,
+
+        diag_shrinkage_threshold::Float64=1e-6,
         min_split_improvement::Float64=0.0,
         partial_sampling::Float64=0.7,
         autogression_coef::Float64=0.1,
@@ -262,6 +268,8 @@ type DF_TrainParams <: AbstractVehicleBehaviorTrainParams
         retval.n_random_predictor_samples = n_random_predictor_samples
         retval.n_autoregression_predictors = n_autoregression_predictors
         retval.use_PCA = use_PCA
+
+        retval.diag_shrinkage_threshold = diag_shrinkage_threshold
         retval.min_split_improvement = min_split_improvement
         retval.partial_sampling = partial_sampling
         retval.autogression_coef = autogression_coef
@@ -365,6 +373,8 @@ type DynamicForestBehavior <: AbstractVehicleBehavior
         retval
     end
 end
+AutomotiveDrivingModels.get_targets(behavior::DynamicForestBehavior) = behavior.targets
+AutomotiveDrivingModels.get_indicators(behavior::DynamicForestBehavior) = behavior.extractor.indicators
 
 function preallocate_learning_data(
     dset::ModelTrainingData2,
@@ -523,6 +533,7 @@ function train(
     global DEFAULT_AUTOREGRESSION_CONSTANT = autogression_coef
     global DEFAULT_NUM_AUTOREGRESSION_PREDICTORS = n_autoregression_predictors
     global DEFAULT_NUM_PREDICTOR_SAMPLES = n_random_predictor_samples
+    global GLOBAL_DIAG_SHRINKAGE_THRESOLD = params.diag_shrinkage_threshold
 
     build_tree_params = BuildTreeParameters(
         round(Int, sqrt(length(extractor.indicators))),

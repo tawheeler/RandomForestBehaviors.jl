@@ -287,6 +287,28 @@ type GMR
         retval
     end
 end
+function Base.print(model::GMR)
+    if !model.converged
+        println("GMR: <not converged>")
+    else
+        println("GMR:")
+        for (i, mat) in enumerate(model.vec_A)
+            println(i)
+            print("\t[")
+            for j in 1:size(mat,2)
+                @printf("  %10.6f", mat[1,j])
+            end
+            @printf("] + [  %10.6f]\n", model.vec_b[i][1])
+            print("\t[")
+            for j in 1:size(mat,2)
+                @printf("  %10.6f", mat[2,j])
+            end
+            @printf("] + [  %10.6f]\n", model.vec_b[i][2])
+        end
+        println("\tmixture_Obs: ")
+        println("\t\tprior: ", model.mixture_Obs.prior)
+    end
+end
 
 _n_learned_components(gmr::GMR) = length(gmr.vec_A)
 function nsuffstats(gmr::GMR)
@@ -371,7 +393,10 @@ function _calc_action_loglikelihood(gmr::GMR, a::Vector{Float64}, f::Vector{Floa
     logl
 end
 function _train_model(gmm::PyObject, YX::Matrix{Float64}, chosen_indicators::Vector{Int}, params::GMR_TrainParams)
+    # println("GMM trainging ", chosen_indicators)
+    # tic()
     gmm[:fit](YX[:,[1;2;chosen_indicators+2]])
+    # toc()
     GMR(gmm, params)
 end
 function _calc_bic_score(gmr::GMR, YX::Matrix{Float64}, chosen_indicators::Vector{Int})
@@ -383,12 +408,12 @@ function _calc_bic_score(gmr::GMR, YX::Matrix{Float64}, chosen_indicators::Vecto
         a = Array(Float64, 2)
         f = Array(Float64, length(chosen_indicators))
 
-        m = size(YX, 2)
+        m = size(YX, 1)
         logl = 0.0
         for i in 1 : m
 
-            a[1] = YX[1,i]
-            a[2] = YX[2,i]
+            a[1] = YX[i,1]
+            a[2] = YX[i,2]
 
             for (j,p) in enumerate(chosen_indicators)
                 f[j] = YX[i, 2+p]
@@ -397,7 +422,12 @@ function _calc_bic_score(gmr::GMR, YX::Matrix{Float64}, chosen_indicators::Vecto
             logl += _calc_action_loglikelihood(gmr, a, f)
         end
 
-        logl - log(m)*nsuffstats(gmr)/2
+        # # DEBUG
+        # println("\tlogl:     ", logl)
+        # println("\t2nd term: ", log(m)*nsuffstats(gmr)/2)
+        # println("\ttotal:    ", logl - log(m)*nsuffstats(gmr)/2)
+
+        bic = logl - log(m)*nsuffstats(gmr)/2
     end
 
     bic
@@ -455,48 +485,20 @@ type GMRBehavior <: AbstractVehicleBehavior
 end
 function Base.print(io::IO, GM::GMRBehavior)
 
-    num_components = ncomponents(GM.mixture_Obs)
+    num_components = ncomponents(GM.gmr.mixture_Obs)
     n_indicators = length(GM.processor.z)
 
     println(io, "Gaussian Mixture Regression Model")
     println(io, "\ttargets: ", GM.targets)
     println(io, "\tncomponents: ", num_components)
-    println(io, "\tpdf(p)")
-    for i in 1 : num_components
-        w = GM.mixture_Obs.prior.p[i]
-        μ = GM.mixture_Obs.components[i].μ
-        Σ = GM.mixture_Obs.components[i].Σ
-
-        for j in 1 : n_indicators
-            if j != n_indicators
-                @printf(io, "\t                       [%10.6f]      [", μ[j])
-                for k in 1 : n_indicators
-                    @printf(io, "%10.6f", Σ.mat[j,k])
-                    if k != n_indicators
-                        print(io, "  ")
-                    end
-                end
-                println(io, "]")
-            else
-                @printf(io, "\t%2d: w = %10.6f μ = [%10.6f]  Σ = [", i, w, μ[j])
-                for k in 1 : n_indicators
-                    @printf(io, "%10.6f", Σ.mat[j,k])
-                    if k != n_indicators
-                        print(io, "  ")
-                    end
-                end
-                println(io, "]")
-            end
-        end
-    end
-    println(io, "\tpdf(a|p)")
-    for i in 1 : num_components
-        A = GM.vec_A[i]
-        b = GM.vec_b[i]
-        Σ = GM.mixture_Act_given_Obs.components[i].Σ
-        @printf(io, "\t        [%10.6f]     [%10.6f]      [%10.6f  %10.6f]\n", A[1,1], b[1], Σ.mat[1,1], Σ.mat[1,2])
-        @printf(io, "\t%2d: A = [%10.6f] b = [%10.6f]  Σ = [%10.6f  %10.6f]\n", i, A[2,1], b[2], Σ.mat[2,1], Σ.mat[2,2])
-    end
+    println(io, "\tnindicators: ", n_indicators)
+    print(GM.gmr)
+end
+AutomotiveDrivingModels.get_targets(behavior::GMRBehavior) = behavior.targets
+function AutomotiveDrivingModels.get_indicators(behavior::GMRBehavior)
+    subset_index = findfirst(p->isa(p, DataSubset), behavior.processor.processors)
+    subset = behavior.processor.processors[subset_index]
+    behavior.extractor.indicators[subset.indeces]
 end
 _n_learned_components(GM::GMRBehavior) = length(GM.gmr.vec_A)
 
@@ -609,12 +611,24 @@ function calc_action_loglikelihood(
     frameind::Integer,
     )
 
+    # println("before: behavior.extractor.x: ", behavior.extractor.x)
+
     observe!(behavior.extractor, features, frameind)
     process!(behavior.processor)
 
+    # println("after: behavior.extractor.x: ", behavior.extractor.x)
+    # println("after: behavior.processor.z: ", behavior.processor.z)
+    # println("before: behavior.processor_target.z: ", behavior.processor_target.z)
+    # println("before: behavior.processor_target.x: ", behavior.processor_target.x)
+
     action_lat = features[frameind, symbol(behavior.targets.lat)]::Float64
     action_lon = features[frameind, symbol(behavior.targets.lon)]::Float64
+    # println("action_lat: ", action_lat)
+    # println("action_lon: ", action_lon)
     _set_and_process_action!(behavior, action_lat, action_lon)
+
+    # println("after: behavior.processor_target.x: ", behavior.processor_target.x)
+    # println("after: behavior.processor_target.z: ", behavior.processor_target.z)
 
     _calc_action_loglikelihood(behavior)
 end
@@ -654,7 +668,7 @@ function train(
                       )
 
     n_indicators = size(YX, 2) - 2
-    max_n_indicators = min(params.max_n_indicators, n_indicators)
+    max_n_indicators = min(params.max_n_indicators, n_indicators, div(size(YX, 1), 2))
     chosen_indicators = Int[] # start with no parents
     best_model = _train_model(gmm, YX, chosen_indicators, params)
     best_score = _calc_bic_score(best_model, YX, chosen_indicators)
