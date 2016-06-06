@@ -378,6 +378,9 @@ function nsuffstats(gmr::GMR)
 end
 function _calc_action_loglikelihood(gmr::GMR, a::Vector{Float64}, f::Vector{Float64})
 
+    if !gmr.converged
+        println("converged: ", gmr.converged)
+    end
 
     mixture_Act_given_Obs = gmr.mixture_Act_given_Obs
     mixture_Obs = gmr.mixture_Obs
